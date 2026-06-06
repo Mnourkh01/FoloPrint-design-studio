@@ -74,10 +74,10 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       .jpeg()
       .toBuffer();
 
-  const uploadPng = async (): Promise<UploadedAssetDto> => {
+  const uploadPng = async (width = 200, height = 200): Promise<UploadedAssetDto> => {
     const res = await http()
       .post('/assets/upload')
-      .attach('file', await makePng(), { filename: 'logo.png', contentType: 'image/png' })
+      .attach('file', await makePng(width, height), { filename: 'logo.png', contentType: 'image/png' })
       .expect(201);
     return res.body as UploadedAssetDto;
   };
@@ -751,6 +751,152 @@ describe('FoloPrint Design Studio API (e2e)', () => {
 
       // The single-design route still reports the corruption loudly.
       await http().get(`/designs/${corrupt.id}`).expect(500);
+    });
+  });
+
+  describe('print quality warnings (advisory)', () => {
+    // Seeded front area: 260x340 canvas px over 12 x 15.7 in. The worse axis is Y
+    // (340/15.7 ~ 21.66 px/in), so a square asset filling the area is governed by it.
+    const fullFrontObject = (assetId: string) => {
+      const front = area('front');
+      return {
+        assetId,
+        x: front.x + front.width / 2,
+        y: front.y + front.height / 2,
+        width: front.width,
+        height: front.height,
+        rotation: 0,
+      };
+    };
+
+    const createFrontDesign = async (object: object): Promise<DesignProjectDto> => {
+      const res = await http()
+        .post('/designs')
+        .send({ templateId: template.id, placements: [{ printAreaKey: 'front', objects: [object] }] })
+        .expect(201); // advisory: poor quality never blocks the save
+      return res.body as DesignProjectDto;
+    };
+
+    it('seeded template carries the physical print sizes', () => {
+      expect(area('front').widthInches).toBe(12);
+      expect(area('front').heightInches).toBe(15.7);
+      expect(area('back').widthInches).toBe(12);
+      expect(area('back').heightInches).toBe(17.5);
+    });
+
+    it('flags a low-res image as poor without blocking save or render', async () => {
+      const tiny = await uploadPng(64, 64);
+      const design = await createFrontDesign(fullFrontObject(tiny.id));
+
+      expect(design.qualityWarnings).toHaveLength(1);
+      const warning = design.qualityWarnings[0]!;
+      expect(warning).toMatchObject({
+        printAreaKey: 'front',
+        objectIndex: 0,
+        assetId: tiny.id,
+        level: 'poor',
+      });
+      // 64px over 15.7in -> ~4 DPI, rounded integer.
+      expect(warning.effectiveDpi).toBe(4);
+
+      // GET returns the same recomputed warnings.
+      const fetched = await http().get(`/designs/${design.id}`).expect(200);
+      expect((fetched.body as DesignProjectDto).qualityWarnings).toEqual(design.qualityWarnings);
+
+      // Render is also not blocked and produces a real preview.
+      await http().post(`/designs/${design.id}/render`).expect(201);
+      await http().get(`/designs/${design.id}/preview/front`).expect(200);
+    });
+
+    it('returns a warning level for mid-res and no warnings for hi-res artwork', async () => {
+      // 2000px over 15.7in -> ~127 DPI: warning band (100..149).
+      const mid = await uploadPng(2000, 2000);
+      const midDesign = await createFrontDesign(fullFrontObject(mid.id));
+      expect(midDesign.qualityWarnings).toHaveLength(1);
+      expect(midDesign.qualityWarnings[0]!.level).toBe('warning');
+      expect(midDesign.qualityWarnings[0]!.effectiveDpi).toBe(127);
+
+      // 2400px over 15.7in -> ~153 DPI: ok, list stays empty.
+      const hi = await uploadPng(2400, 2400);
+      const hiDesign = await createFrontDesign(fullFrontObject(hi.id));
+      expect(hiDesign.qualityWarnings).toEqual([]);
+    });
+
+    it('update replacing low-res artwork with hi-res clears the warnings', async () => {
+      const tiny = await uploadPng(64, 64);
+      const design = await createFrontDesign(fullFrontObject(tiny.id));
+      expect(design.qualityWarnings).toHaveLength(1);
+
+      const hi = await uploadPng(2400, 2400);
+      const updated = await http()
+        .put(`/designs/${design.id}`)
+        .send({
+          templateId: template.id,
+          placements: [{ printAreaKey: 'front', objects: [fullFrontObject(hi.id)] }],
+        })
+        .expect(200);
+      expect((updated.body as DesignProjectDto).qualityWarnings).toEqual([]);
+    });
+
+    it('list rows carry worstQualityLevel; corrupt rows degrade to null', async () => {
+      await prisma.designProject.deleteMany();
+
+      const tiny = await uploadPng(64, 64);
+      const poor = await createFrontDesign(fullFrontObject(tiny.id));
+      const hi = await uploadPng(2400, 2400);
+      const ok = await createFrontDesign(fullFrontObject(hi.id));
+      const corrupt = await prisma.designProject.create({
+        data: { productTemplateId: template.id, designJson: { version: 99 } },
+      });
+
+      const res = await http().get('/designs').expect(200);
+      const list = res.body as DesignListDto;
+      const byId = new Map(list.items.map((i) => [i.id, i]));
+
+      expect(byId.get(poor.id)!.worstQualityLevel).toBe('poor');
+      expect(byId.get(ok.id)!.worstQualityLevel).toBe('ok');
+      expect(byId.get(corrupt.id)!.worstQualityLevel).toBeNull();
+    });
+
+    it('leaks no storage paths through the quality fields', async () => {
+      const tiny = await uploadPng(64, 64);
+      const design = await createFrontDesign(fullFrontObject(tiny.id));
+
+      const raw = JSON.stringify(design.qualityWarnings);
+      expect(raw).not.toMatch(/storagePath|uploads[\\/]|previews[\\/]/);
+      expect(raw).not.toMatch(/[A-Z]:\\\\/);
+      expect(raw).not.toMatch(/(^|[^:])\/(home|var|tmp)\//);
+
+      const listRaw = JSON.stringify((await http().get('/designs').expect(200)).body);
+      expect(listRaw).not.toMatch(/storagePath|uploads[\\/]/);
+    });
+
+    it('stores EXIF-rotated upload dimensions as the normalized pixels', async () => {
+      // Orientation 6 = 90deg rotation: a 100x50 source renders as 50x100.
+      const rotated = await sharp({
+        create: { width: 100, height: 50, channels: 3, background: { r: 10, g: 10, b: 10 } },
+      })
+        .jpeg()
+        .withMetadata({ orientation: 6 })
+        .toBuffer();
+
+      const res = await http()
+        .post('/assets/upload')
+        .attach('file', rotated, { filename: 'rotated.jpg', contentType: 'image/jpeg' })
+        .expect(201);
+      const asset = res.body as UploadedAssetDto;
+      expect(asset.width).toBe(50);
+      expect(asset.height).toBe(100);
+
+      // The stored file really has those pixels (not just the DB record).
+      const fileRes = await http().get(asset.url).buffer(true).parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (c: Buffer) => chunks.push(c));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      }).expect(200);
+      const meta = await sharp(fileRes.body as Buffer).metadata();
+      expect(meta.width).toBe(50);
+      expect(meta.height).toBe(100);
     });
   });
 });

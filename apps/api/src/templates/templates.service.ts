@@ -57,6 +57,9 @@ export class TemplatesService {
         y: area.y,
         width: area.width,
         height: area.height,
+        // Physical print size; null means the client applies the shared 12in fallback.
+        widthInches: area.widthInches,
+        heightInches: area.heightInches,
         // Null means "use the template-level image"; the area URLs only exist when the
         // area carries its own view images. Storage paths never leave the server.
         imageUrl: area.baseImagePath

@@ -4,11 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Canvas, FabricImage, Rect, type FabricObject } from 'fabric';
 import {
+  evaluateObjectQuality,
+  printAreaPpi,
   validateDesignPlacements,
   type DesignObject,
   type DesignPlacement,
   type DesignProjectDto,
   type PrintAreaDto,
+  type PrintQualityLevel,
   type ProductTemplateDto,
 } from '@foloprint/shared';
 import {
@@ -42,7 +45,16 @@ interface SelectionReadout {
   width: number;
   height: number;
   rotation: number;
+  /** Advisory print quality; null when the source pixel size is unknown. */
+  quality: { effectiveDpi: number; level: PrintQualityLevel } | null;
 }
+
+/** One short phrase per quality level; advisory voice, never a hard stop. */
+const QUALITY_COPY: Record<PrintQualityLevel, string> = {
+  ok: 'good to print',
+  warning: 'may look soft up close',
+  poor: 'too low for sharp print',
+};
 
 export function EditorClient({
   template,
@@ -93,6 +105,12 @@ export function EditorClient({
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
     [template.printAreas, activeAreaKey],
+  );
+
+  /** Canvas px per inch per area key, for the advisory DPI readout. */
+  const ppiByKey = useMemo(
+    () => new Map(template.printAreas.map((a) => [a.key, printAreaPpi(a)])),
+    [template.printAreas],
   );
 
   const designedObjects = useCallback((): DesignedObject[] => {
@@ -159,19 +177,43 @@ export function EditorClient({
     [areaOf, clampToPrintArea],
   );
 
-  const readSelection = useCallback((obj: FabricObject | undefined | null) => {
-    if (!obj || !(obj as DesignedObject).assetId) {
-      setSelection(null);
-      return;
-    }
-    setSelection({
-      x: Math.round(obj.left ?? 0),
-      y: Math.round(obj.top ?? 0),
-      width: Math.round(obj.getScaledWidth()),
-      height: Math.round(obj.getScaledHeight()),
-      rotation: Math.round(obj.angle ?? 0),
-    });
-  }, []);
+  /**
+   * Advisory print quality of one canvas object. A FabricImage's unscaled
+   * width/height IS the source pixel size (uploads are stored at original size),
+   * so the editor needs no extra API data for the DPI math.
+   */
+  const qualityOf = useCallback(
+    (obj: DesignedObject) => {
+      const ppi = ppiByKey.get(obj.printAreaKey ?? activeAreaKeyRef.current) ?? null;
+      return evaluateObjectQuality(
+        { width: obj.width ?? null, height: obj.height ?? null },
+        { width: obj.getScaledWidth(), height: obj.getScaledHeight() },
+        ppi,
+      );
+    },
+    [ppiByKey],
+  );
+
+  const readSelection = useCallback(
+    (obj: FabricObject | undefined | null) => {
+      if (!obj || !(obj as DesignedObject).assetId) {
+        setSelection(null);
+        return;
+      }
+      const quality = qualityOf(obj as DesignedObject);
+      setSelection({
+        x: Math.round(obj.left ?? 0),
+        y: Math.round(obj.top ?? 0),
+        width: Math.round(obj.getScaledWidth()),
+        height: Math.round(obj.getScaledHeight()),
+        rotation: Math.round(obj.angle ?? 0),
+        quality: quality
+          ? { effectiveDpi: Math.round(quality.effectiveDpi), level: quality.level }
+          : null,
+      });
+    },
+    [qualityOf],
+  );
 
   const removeActiveObject = useCallback(() => {
     const canvas = canvasRef.current;
@@ -470,6 +512,27 @@ export function EditorClient({
     [template.printAreas],
   );
 
+  /**
+   * Advisory list of poor-quality objects across all areas, shown with the save
+   * status. Never blocks the save; the server recomputes its own warnings anyway.
+   */
+  const collectPoorNotes = useCallback((): string[] => {
+    const notes: string[] = [];
+    const counters = new Map<string, number>();
+    for (const obj of designedObjects()) {
+      if (!obj.printAreaKey) continue;
+      const n = (counters.get(obj.printAreaKey) ?? 0) + 1;
+      counters.set(obj.printAreaKey, n);
+      const quality = qualityOf(obj);
+      if (quality?.level === 'poor') {
+        notes.push(
+          `${areaName(obj.printAreaKey)}, object ${n}: ~${Math.round(quality.effectiveDpi)} DPI, will likely print blurry`,
+        );
+      }
+    }
+    return notes;
+  }, [designedObjects, qualityOf, areaName]);
+
   const handleSave = async () => {
     const placements = collectPlacements();
     if (placements.length === 0) {
@@ -491,6 +554,9 @@ export function EditorClient({
       return;
     }
 
+    // Advisory only: low-resolution artwork is reported with the result, never blocked.
+    const poorNotes = collectPoorNotes();
+
     setBusy('save');
     setStatus({ tone: 'info', message: designId ? 'Updating design...' : 'Saving design...' });
     try {
@@ -501,12 +567,17 @@ export function EditorClient({
         setStatus({
           tone: 'success',
           message: 'Design updated. The old previews are stale; render the mockups again.',
+          details: poorNotes.length > 0 ? poorNotes : undefined,
         });
       } else {
         const design = await saveDesign(payload);
         setDesignId(design.id);
         setDirty(false);
-        setStatus({ tone: 'success', message: 'Design saved. Generate the mockups when ready.' });
+        setStatus({
+          tone: 'success',
+          message: 'Design saved. Generate the mockups when ready.',
+          details: poorNotes.length > 0 ? poorNotes : undefined,
+        });
       }
     } catch (error) {
       setStatus({
@@ -651,6 +722,16 @@ export function EditorClient({
                 <span>
                   angle <b>{selection.rotation}deg</b>
                 </span>
+                {selection.quality && (
+                  <span
+                    className={`readout__quality readout__quality--${selection.quality.level}`}
+                    data-testid="dpi-readout"
+                    data-level={selection.quality.level}
+                  >
+                    print <b>~{selection.quality.effectiveDpi} DPI</b>,{' '}
+                    {QUALITY_COPY[selection.quality.level]}
+                  </span>
+                )}
               </div>
               <button
                 type="button"

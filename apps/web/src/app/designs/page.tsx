@@ -112,6 +112,14 @@ export default async function DesignLibraryPage({
                     ) : (
                       <span className="chip chip--muted">Unreadable design</span>
                     )}
+                    {(item.worstQualityLevel === 'warning' || item.worstQualityLevel === 'poor') && (
+                      <span
+                        className={`chip chip--quality-${item.worstQualityLevel}`}
+                        data-testid="quality-badge"
+                      >
+                        {item.worstQualityLevel === 'poor' ? 'low res artwork' : 'may print soft'}
+                      </span>
+                    )}
                   </p>
                   <div className="design-card__actions">
                     <Link

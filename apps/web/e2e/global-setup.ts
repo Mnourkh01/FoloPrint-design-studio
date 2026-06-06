@@ -7,4 +7,6 @@ const { makeLogoPng } = require('./fixtures/make-logo.js') as {
 
 export default function globalSetup(): void {
   writeFileSync(join(__dirname, 'fixtures', 'logo.png'), makeLogoPng(200, 200));
+  // Deliberately tiny: lands deep in the "poor" DPI band for the warning spec.
+  writeFileSync(join(__dirname, 'fixtures', 'tiny.png'), makeLogoPng(64, 64));
 }

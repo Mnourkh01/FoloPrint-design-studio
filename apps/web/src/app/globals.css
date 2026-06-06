@@ -395,6 +395,46 @@ button {
   font-weight: 600;
 }
 
+/* Advisory DPI line under the selection readout; level decides the tone. */
+.readout__quality {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper-deep);
+}
+
+.readout__quality--ok {
+  border-color: #bcd5c9;
+  background: #ecf5f0;
+  color: #2e6e52;
+}
+
+.readout__quality--ok b {
+  color: #2e6e52;
+}
+
+.readout__quality--warning {
+  border-color: #ecd2a1;
+  background: #fdf4e3;
+  color: #8a6312;
+}
+
+.readout__quality--warning b {
+  color: #8a6312;
+}
+
+.readout__quality--poor {
+  border-color: #e7b8ab;
+  background: #fbeeea;
+  color: var(--accent-deep);
+}
+
+.readout__quality--poor b {
+  color: var(--accent-deep);
+}
+
 .btn {
   appearance: none;
   border: 1px solid var(--ink);
@@ -570,6 +610,38 @@ button {
   font-weight: 500;
 }
 
+/* Advisory print-quality list on the design preview page. */
+.quality-warnings {
+  margin: 0 0 22px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid #ecd2a1;
+  background: #fdf4e3;
+}
+
+.quality-warnings__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8a6312;
+  margin: 0 0 6px;
+}
+
+.quality-warnings ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.quality-warnings__item {
+  font-size: 13px;
+  color: #8a6312;
+}
+
+.quality-warnings__item--poor {
+  color: var(--accent-deep);
+}
+
 .page-title {
   font-family: var(--font-display);
   font-size: 32px;
@@ -702,6 +774,19 @@ button {
 }
 
 .chip--muted {
+  color: var(--accent-deep);
+  background: #fbeeea;
+  border-color: #e7b8ab;
+}
+
+/* Advisory artwork-quality badges on library cards. */
+.chip--quality-warning {
+  color: #8a6312;
+  background: #fdf4e3;
+  border-color: #ecd2a1;
+}
+
+.chip--quality-poor {
   color: var(--accent-deep);
   background: #fbeeea;
   border-color: #e7b8ab;

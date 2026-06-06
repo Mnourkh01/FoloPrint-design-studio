@@ -1,4 +1,4 @@
-import type { DesignPlacement, PrintQualityLevel, Rect } from './types';
+import type { PrintQualityLevel, Rect, StoredDesignPlacement } from './types';
 
 /**
  * Print quality (DPI) math for image objects.
@@ -105,9 +105,11 @@ export interface ObjectQualityWarning {
 /**
  * Walks a v2 document's placements and returns warnings only: ok-level objects and
  * objects with unknown inputs (missing asset dims, unknown area) stay silent.
+ * Text objects are vector-like (no source bitmap), so DPI does not apply and they
+ * are skipped entirely; objectIndex still refers to the full objects array.
  */
 export function collectQualityWarnings(
-  placements: Pick<DesignPlacement, 'printAreaKey' | 'objects'>[],
+  placements: Pick<StoredDesignPlacement, 'printAreaKey' | 'objects'>[],
   areas: (PhysicalPrintArea & { key: string })[],
   assetDimsById: Map<string, { width: number | null; height: number | null }>,
 ): ObjectQualityWarning[] {
@@ -117,6 +119,8 @@ export function collectQualityWarnings(
   for (const placement of placements) {
     const ppi = ppiByKey.get(placement.printAreaKey) ?? null;
     placement.objects.forEach((object, objectIndex) => {
+      // Missing type = legacy image; only explicit text objects are skipped.
+      if (object.type === 'text') return;
       const asset = assetDimsById.get(object.assetId);
       if (!asset) return;
       const quality = evaluateObjectQuality(asset, object, ppi);

@@ -3,19 +3,52 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsIn,
   IsNumber,
+  IsOptional,
   IsPositive,
   IsString,
   IsUUID,
   Length,
+  Matches,
   Max,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import {
+  FONT_KEYS,
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
+  HEX_COLOR_PATTERN,
+  TEXT_ALIGNMENTS,
+  TEXT_MAX_LENGTH,
+  type TextAlign,
+} from '@foloprint/shared';
 
+const isText = (o: DesignObjectDto): boolean => o.type === 'text';
+
+/**
+ * One design object: an image (assetId) or a text element, discriminated on `type`.
+ * A missing `type` means image, so pre-v1.5 clients keep working unchanged.
+ *
+ * One class with conditional validators instead of class-transformer subtype
+ * discrimination: simpler to debug, and kind purity (text never carries assetId,
+ * image never carries text fields) is enforced by the shared validation the
+ * service runs as the authority (designObjectContentErrors).
+ *
+ * Line count, control characters, and cross-field rules are also covered by that
+ * shared validation; this DTO rejects the cheap structural failures early.
+ */
 export class DesignObjectDto {
+  @IsOptional()
+  @IsIn(['image', 'text'])
+  type?: 'image' | 'text';
+
+  /** UploadedAsset id; required for image objects (and legacy typeless objects). */
+  @ValidateIf((o: DesignObjectDto) => !isText(o))
   @IsUUID()
-  assetId!: string;
+  assetId?: string;
 
   /** Object center X, template canvas px. */
   @IsNumber({ allowNaN: false, allowInfinity: false })
@@ -38,6 +71,33 @@ export class DesignObjectDto {
   @Min(-360)
   @Max(360)
   rotation!: number;
+
+  /** Plain text, `\n` for explicit line breaks. Text objects only. */
+  @ValidateIf(isText)
+  @IsString()
+  @Length(1, TEXT_MAX_LENGTH)
+  text?: string;
+
+  /** Whitelist font key. Text objects only. */
+  @ValidateIf(isText)
+  @IsIn(FONT_KEYS as string[])
+  fontFamily?: string;
+
+  /** Font size in canvas px. Text objects only. */
+  @ValidateIf(isText)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(FONT_SIZE_MIN)
+  @Max(FONT_SIZE_MAX)
+  fontSize?: number;
+
+  /** #RRGGBB. Text objects only. */
+  @ValidateIf(isText)
+  @Matches(HEX_COLOR_PATTERN, { message: 'color must be a #RRGGBB hex value' })
+  color?: string;
+
+  @ValidateIf(isText)
+  @IsIn(TEXT_ALIGNMENTS as readonly string[])
+  align?: TextAlign;
 }
 
 /** All artwork for one print area. Placements with zero objects are rejected. */
@@ -55,8 +115,9 @@ export class DesignPlacementDto {
 }
 
 /**
- * Design document v2 write shape. Duplicate/unknown/inactive print area keys and
- * per-area geometry are enforced in DesignsService against the live template.
+ * Design document v2 write shape. Duplicate/unknown/inactive print area keys,
+ * per-area geometry, and object content rules (including kind purity) are enforced
+ * in DesignsService against the live template via the shared validators.
  */
 export class CreateDesignDto {
   @IsUUID()

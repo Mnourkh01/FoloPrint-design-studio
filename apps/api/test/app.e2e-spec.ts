@@ -561,6 +561,182 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('text objects (v1.5)', () => {
+    const textIn = (
+      a: PrintAreaDto,
+      overrides: Partial<Record<string, unknown>> = {},
+    ) => ({
+      type: 'text',
+      text: 'Hello print',
+      fontFamily: 'inter',
+      fontSize: 48,
+      color: '#cc0033',
+      align: 'center',
+      x: a.x + a.width / 2,
+      y: a.y + a.height / 2,
+      width: 180,
+      height: 60,
+      rotation: 0,
+      ...overrides,
+    });
+
+    const postFrontObjects = (objects: object[]) =>
+      http()
+        .post('/designs')
+        .send({ templateId: template.id, placements: [{ printAreaKey: 'front', objects }] });
+
+    it('saves a text-only design and echoes the typed document', async () => {
+      const res = await postFrontObjects([textIn(area('front'))]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.version).toBe(2);
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({
+        type: 'text',
+        text: 'Hello print',
+        fontFamily: 'inter',
+        fontSize: 48,
+        color: '#cc0033',
+        align: 'center',
+      });
+    });
+
+    it('saves a mixed image+text placement', async () => {
+      const asset = await uploadPng();
+      const res = await postFrontObjects([
+        { type: 'image', ...objectIn(area('front'), asset.id) },
+        textIn(area('front'), { y: area('front').y + 40, height: 40 }),
+      ]).expect(201);
+      const objects = (res.body as DesignProjectDto).design.placements[0]!.objects;
+      expect(objects.map((o) => o.type)).toEqual(['image', 'text']);
+    });
+
+    it('accepts a typeless image object (legacy client) and stores it typed', async () => {
+      const asset = await uploadPng();
+      const res = await postFrontObjects([objectIn(area('front'), asset.id)]).expect(201);
+      expect((res.body as DesignProjectDto).design.placements[0]!.objects[0]!.type).toBe('image');
+    });
+
+    it('rejects a font outside the whitelist', async () => {
+      const res = await postFrontObjects([textIn(area('front'), { fontFamily: 'comic-sans' })]).expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/fontFamily/);
+    });
+
+    it('rejects bad colors (named, shorthand, rgb())', async () => {
+      for (const color of ['red', '#fff', 'rgb(0,0,0)']) {
+        await postFrontObjects([textIn(area('front'), { color })]).expect(400);
+      }
+    });
+
+    it('rejects empty, too-long, and too-many-line text', async () => {
+      await postFrontObjects([textIn(area('front'), { text: '' })]).expect(400);
+      await postFrontObjects([textIn(area('front'), { text: 'a'.repeat(301) })]).expect(400);
+      await postFrontObjects([
+        textIn(area('front'), { text: Array(9).fill('x').join('\n') }),
+      ]).expect(400);
+    });
+
+    it('rejects font sizes outside 12..500', async () => {
+      await postFrontObjects([textIn(area('front'), { fontSize: 11 })]).expect(400);
+      await postFrontObjects([textIn(area('front'), { fontSize: 501 })]).expect(400);
+    });
+
+    it('rejects unknown align values', async () => {
+      await postFrontObjects([textIn(area('front'), { align: 'justify' })]).expect(400);
+    });
+
+    it('rejects kind-mixed payloads (text with assetId)', async () => {
+      const asset = await uploadPng();
+      const res = await postFrontObjects([
+        textIn(area('front'), { assetId: asset.id }),
+      ]).expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/must not carry an assetId/);
+    });
+
+    it('rejects text outside the print area, including via rotation', async () => {
+      const front = area('front');
+      await postFrontObjects([
+        textIn(front, { x: front.x + front.width + 100 }),
+      ]).expect(400);
+      await postFrontObjects([
+        textIn(front, { width: front.width, height: front.height, rotation: 30 }),
+      ]).expect(400);
+    });
+
+    it('renders a text design to a real PNG preview at canvas size', async () => {
+      const res = await postFrontObjects([textIn(area('front'))]).expect(201);
+      const designId = (res.body as DesignProjectDto).id;
+
+      await http().post(`/designs/${designId}/render`).expect(201);
+      const png = await fetchPngBuffer(`/designs/${designId}/preview/front`);
+      expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+      const meta = await sharp(png).metadata();
+      expect(meta.width).toBe(template.canvasWidth);
+      expect(meta.height).toBe(template.canvasHeight);
+    });
+
+    it('round-trips a text design through save, update, and reopen', async () => {
+      const front = area('front');
+      const created = await postFrontObjects([textIn(front)]).expect(201);
+      const designId = (created.body as DesignProjectDto).id;
+
+      await http()
+        .put(`/designs/${designId}`)
+        .send({
+          templateId: template.id,
+          placements: [
+            {
+              printAreaKey: 'front',
+              objects: [textIn(front, { text: 'Updated\ntext', fontFamily: 'oswald', align: 'left' })],
+            },
+          ],
+        })
+        .expect(200);
+
+      const reopened = await http().get(`/designs/${designId}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        type: 'text',
+        text: 'Updated\ntext',
+        fontFamily: 'oswald',
+        align: 'left',
+      });
+    });
+
+    it('library rows count image and text objects separately', async () => {
+      await prisma.designProject.deleteMany();
+      const asset = await uploadPng();
+      const front = area('front');
+      await postFrontObjects([
+        { type: 'image', ...objectIn(front, asset.id) },
+        textIn(front, { y: front.y + 40, height: 40 }),
+      ]).expect(201);
+
+      const res = await http().get('/designs').expect(200);
+      const item = (res.body as DesignListDto).items[0]!;
+      expect(item.placements[0]).toMatchObject({ objectCount: 2, imageCount: 1, textCount: 1 });
+    });
+  });
+
+  describe('GET /fonts/:key/file', () => {
+    it('streams a whitelisted font as TTF', async () => {
+      const res = await http()
+        .get('/fonts/inter/file')
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (c: Buffer) => chunks.push(c));
+          response.on('end', () => callback(null, Buffer.concat(chunks)));
+        })
+        .expect(200);
+      expect(res.headers['content-type']).toMatch(/font\/ttf/);
+      // TrueType magic: 00 01 00 00.
+      expect((res.body as Buffer).subarray(0, 4).equals(Buffer.from([0x00, 0x01, 0x00, 0x00]))).toBe(true);
+    });
+
+    it('404s for unknown font keys without touching the filesystem layout', async () => {
+      await http().get('/fonts/comic-sans/file').expect(404);
+      await http().get('/fonts/..%2F..%2Fsecret/file').expect(404);
+    });
+  });
+
   describe('GET /designs (design library)', () => {
     // Each test owns the whole table for deterministic list assertions. Earlier blocks
     // create their own fixtures per test, so wiping here cannot break them.
@@ -620,10 +796,10 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       const [first, second] = list.items as [DesignListItemDto, DesignListItemDto];
       expect(first.template).toEqual({ id: template.id, name: 'Classic Tee', slug: 'classic-tee' });
       expect(first.placements).toEqual([
-        { printAreaKey: 'front', printAreaName: area('front').name, objectCount: 1 },
+        { printAreaKey: 'front', printAreaName: area('front').name, objectCount: 1, imageCount: 1, textCount: 0 },
       ]);
       expect(second.placements).toEqual([
-        { printAreaKey: 'back', printAreaName: area('back').name, objectCount: 2 },
+        { printAreaKey: 'back', printAreaName: area('back').name, objectCount: 2, imageCount: 2, textCount: 0 },
       ]);
       expect(Date.parse(first.createdAt)).not.toBeNaN();
       expect(Date.parse(first.updatedAt)).not.toBeNaN();
@@ -869,6 +1045,42 @@ describe('FoloPrint Design Studio API (e2e)', () => {
 
       const listRaw = JSON.stringify((await http().get('/designs').expect(200)).body);
       expect(listRaw).not.toMatch(/storagePath|uploads[\\/]/);
+    });
+
+    it('text-only designs report no quality warnings and a null worst level', async () => {
+      await prisma.designProject.deleteMany();
+      const front = area('front');
+      const design = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          placements: [
+            {
+              printAreaKey: 'front',
+              objects: [
+                {
+                  type: 'text',
+                  text: 'Vector text',
+                  fontFamily: 'inter',
+                  fontSize: 40,
+                  color: '#101010',
+                  align: 'center',
+                  x: front.x + front.width / 2,
+                  y: front.y + front.height / 2,
+                  width: 150,
+                  height: 50,
+                  rotation: 0,
+                },
+              ],
+            },
+          ],
+        })
+        .expect(201);
+      expect((design.body as DesignProjectDto).qualityWarnings).toEqual([]);
+
+      const res = await http().get('/designs').expect(200);
+      const item = (res.body as DesignListDto).items.find((i) => i.id === design.body.id)!;
+      expect(item.worstQualityLevel).toBeNull();
     });
 
     it('stores EXIF-rotated upload dimensions as the normalized pixels', async () => {

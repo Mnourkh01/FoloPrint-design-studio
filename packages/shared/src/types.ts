@@ -18,10 +18,8 @@ export interface Point {
   y: number;
 }
 
-/** One placed artwork inside a print area. */
-export interface DesignObject {
-  /** UploadedAsset id this object renders. */
-  assetId: string;
+/** Geometry shared by every design object kind. */
+export interface DesignObjectBase {
   /** Object center X in canvas px. */
   x: number;
   /** Object center Y in canvas px. */
@@ -34,10 +32,57 @@ export interface DesignObject {
   rotation: number;
 }
 
+/** One placed artwork image inside a print area. */
+export interface ImageDesignObject extends DesignObjectBase {
+  type: 'image';
+  /** UploadedAsset id this object renders. */
+  assetId: string;
+}
+
+export type TextAlign = 'left' | 'center' | 'right';
+
+/**
+ * One placed text element inside a print area. Vector-like: no source bitmap,
+ * so it never participates in DPI quality math.
+ *
+ * width/height are the measured bounding box of the laid-out text in canvas px
+ * (measured by the editor at save time). The server renders text at its natural
+ * size with the same bundled font, then fits it into exactly this box, so
+ * browser/server metric drift becomes sub-percent stretch instead of overflow.
+ */
+export interface TextDesignObject extends DesignObjectBase {
+  type: 'text';
+  /** Plain text. `\n` only for explicit line breaks; no auto-wrap, never markup. */
+  text: string;
+  /** Key into the shared font whitelist (see fonts.ts). */
+  fontFamily: string;
+  /** Font size in canvas px (uniform editor scaling is baked in on save). */
+  fontSize: number;
+  /** Strict #RRGGBB. No alpha, no named colors, no CSS functions. */
+  color: string;
+  align: TextAlign;
+}
+
+/**
+ * One placed object inside a print area, discriminated on `type`.
+ * Stored objects without `type` are legacy images and normalize at read time
+ * (see normalizeDesignDocument); the document version stays v2.
+ */
+export type DesignObject = ImageDesignObject | TextDesignObject;
+
+/** A stored object that may predate the `type` discriminator (legacy image shape). */
+export type StoredDesignObject = DesignObject | (Omit<ImageDesignObject, 'type'> & { type?: undefined });
+
 /** All artwork placed on one print area. A placement exists only if it has objects. */
 export interface DesignPlacement {
   printAreaKey: string;
   objects: DesignObject[];
+}
+
+/** A stored placement whose objects may predate the `type` discriminator. */
+export interface StoredDesignPlacement {
+  printAreaKey: string;
+  objects: StoredDesignObject[];
 }
 
 /**
@@ -55,11 +100,18 @@ export interface DesignDocumentV1 {
   version: 1;
   templateId: string;
   printAreaKey: string;
-  objects: DesignObject[];
+  objects: StoredDesignObject[];
+}
+
+/** A stored v2 document whose objects may predate the `type` discriminator. */
+export interface StoredDesignDocumentV2 {
+  version: 2;
+  templateId: string;
+  placements: StoredDesignPlacement[];
 }
 
 /** Any document shape that may come out of the database. */
-export type AnyDesignDocument = DesignDocumentV1 | DesignDocument;
+export type AnyDesignDocument = DesignDocumentV1 | StoredDesignDocumentV2;
 
 // ---------------------------------------------------------------------------
 // API response shapes (what the web app consumes; never contains fs paths)
@@ -166,7 +218,10 @@ export interface DesignPlacementSummaryDto {
   printAreaKey: string;
   /** Human name from the template's print area; falls back to the key. */
   printAreaName: string;
+  /** Total objects on the area (imageCount + textCount). */
   objectCount: number;
+  imageCount: number;
+  textCount: number;
 }
 
 /**

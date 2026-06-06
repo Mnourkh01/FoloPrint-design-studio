@@ -13,7 +13,8 @@ import { TemplatesModule } from './templates/templates.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ThrottlerModule.forRoot({
-      throttlers: [{ ttl: 60_000, limit: 120 }],
+      // Env-overridable so the e2e suite can exceed the human-scale default.
+      throttlers: [{ ttl: 60_000, limit: Number(process.env.GLOBAL_THROTTLE_LIMIT ?? 120) }],
     }),
     PrismaModule,
     StorageModule,

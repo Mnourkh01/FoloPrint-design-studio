@@ -11,6 +11,9 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 15_000 },
   retries: 0,
+  // One worker: the design-library spec wipes the design_projects table for its
+  // empty-state assertion, which must never race another spec mid-flow.
+  workers: 1,
   reporter: [['list']],
   use: {
     baseURL: 'http://localhost:3000',

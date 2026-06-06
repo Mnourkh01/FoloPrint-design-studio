@@ -2,3 +2,4 @@
 // rate limits, so raise them for tests only. Production defaults stay in the controllers.
 process.env.UPLOAD_THROTTLE_LIMIT = '1000';
 process.env.RENDER_THROTTLE_LIMIT = '1000';
+process.env.GLOBAL_THROTTLE_LIMIT = '10000';

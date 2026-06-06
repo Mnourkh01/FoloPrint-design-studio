@@ -92,7 +92,10 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
             Edit design
           </Link>
         </div>
-        <p style={{ marginTop: 16 }}>
+        <p style={{ marginTop: 16, display: 'flex', gap: 20 }}>
+          <Link href="/designs" className="template-card__cta" data-testid="all-designs">
+            All designs
+          </Link>
           <Link href={`/editor/${design.templateSlug}`} className="template-card__cta">
             Start a new design on this template
           </Link>

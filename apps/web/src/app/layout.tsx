@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { Archivo, Fraunces } from 'next/font/google';
 import './globals.css';
 
@@ -29,7 +30,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <a href="/" className="topbar__mark">
               FoloPrint <em>Design Studio</em>
             </a>
-            <span className="topbar__meta">Proof of concept</span>
+            <nav className="topbar__nav">
+              <Link href="/designs" className="topbar__link" data-testid="nav-designs">
+                Design Library
+              </Link>
+              <span className="topbar__meta">Proof of concept</span>
+            </nav>
           </header>
           <main className="main">{children}</main>
           <footer className="footer">

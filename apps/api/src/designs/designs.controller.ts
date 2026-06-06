@@ -8,13 +8,15 @@ import {
   ParseUUIDPipe,
   Post,
   Put,
+  Query,
   StreamableFile,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import type { DesignProjectDto, RenderResultDto } from '@foloprint/shared';
+import type { DesignListDto, DesignProjectDto, RenderResultDto } from '@foloprint/shared';
 import { DesignsService } from './designs.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateDesignDto } from './dto/create-design.dto';
+import { ListDesignsQueryDto } from './dto/list-designs.query.dto';
 
 /** Env-overridable so the e2e suite can exceed the human-scale default. */
 const RENDER_THROTTLE_LIMIT = Number(process.env.RENDER_THROTTLE_LIMIT ?? 10);
@@ -29,6 +31,12 @@ export class DesignsController {
   @Post()
   create(@Body() dto: CreateDesignDto): Promise<DesignProjectDto> {
     return this.designs.create(dto);
+  }
+
+  /** Paginated design library; summaries only, never full design documents. */
+  @Get()
+  list(@Query() query: ListDesignsQueryDto): Promise<DesignListDto> {
+    return this.designs.list(query.page, query.pageSize);
   }
 
   @Get(':id')

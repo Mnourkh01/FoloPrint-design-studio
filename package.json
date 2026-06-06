@@ -1,0 +1,28 @@
+{
+  "name": "foloprint-design-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone proof-of-concept product design studio for print-on-demand products",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:packages": "npm run build -w @foloprint/shared && npm run build -w @foloprint/renderer",
+    "build": "npm run build:packages && npm run build -w @foloprint/api && npm run build -w @foloprint/web",
+    "dev:api": "npm run start:dev -w @foloprint/api",
+    "dev:web": "npm run dev -w @foloprint/web",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:migrate": "npm run prisma:migrate:dev -w @foloprint/api",
+    "db:seed": "npm run prisma:seed -w @foloprint/api",
+    "test:shared": "npm run test -w @foloprint/shared",
+    "test:renderer": "npm run test -w @foloprint/renderer",
+    "test:api": "npm run test:e2e -w @foloprint/api",
+    "test:web": "npm run test:e2e -w @foloprint/web",
+    "test": "npm run test:shared && npm run test:renderer && npm run test:api"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

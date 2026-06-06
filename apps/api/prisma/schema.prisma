@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ProductTemplate {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String
+  slug             String   @unique
+  baseImagePath    String
+  overlayImagePath String?
+  canvasWidth      Int
+  canvasHeight     Int
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  printAreas     PrintArea[]
+  designProjects DesignProject[]
+
+  @@map("product_templates")
+}
+
+model PrintArea {
+  id                String  @id @default(uuid()) @db.Uuid
+  productTemplateId String  @db.Uuid
+  key               String
+  name              String
+  x                 Int
+  y                 Int
+  width             Int
+  height            Int
+  active            Boolean @default(true)
+
+  productTemplate ProductTemplate @relation(fields: [productTemplateId], references: [id], onDelete: Cascade)
+
+  @@unique([productTemplateId, key])
+  @@map("print_areas")
+}
+
+model UploadedAsset {
+  id               String   @id @default(uuid()) @db.Uuid
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  width            Int?
+  height           Int?
+  storagePath      String
+  createdAt        DateTime @default(now())
+
+  @@map("uploaded_assets")
+}
+
+model DesignProject {
+  id                String   @id @default(uuid()) @db.Uuid
+  productTemplateId String   @db.Uuid
+  designJson        Json
+  previewPath       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  productTemplate ProductTemplate @relation(fields: [productTemplateId], references: [id], onDelete: Restrict)
+
+  @@map("design_projects")
+}

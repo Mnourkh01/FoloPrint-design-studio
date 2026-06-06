@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: foloprint-design-studio-db
+    environment:
+      POSTGRES_USER: foloprint
+      POSTGRES_PASSWORD: foloprint
+      POSTGRES_DB: foloprint_design_studio
+    ports:
+      # 5433 on host to avoid colliding with any locally installed Postgres
+      - "5433:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foloprint -d foloprint_design_studio"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  dbdata:

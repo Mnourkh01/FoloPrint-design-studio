@@ -63,8 +63,7 @@ export async function uploadAsset(file: File): Promise<UploadedAssetDto> {
 
 export interface SaveDesignPayload {
   templateId: string;
-  printAreaKey: string;
-  objects: DesignDocument['objects'];
+  placements: DesignDocument['placements'];
 }
 
 export async function saveDesign(payload: SaveDesignPayload): Promise<DesignProjectDto> {
@@ -77,7 +76,7 @@ export async function saveDesign(payload: SaveDesignPayload): Promise<DesignProj
   );
 }
 
-/** Replaces the design document of an existing design; the server clears the stale preview. */
+/** Replaces the design document of an existing design; the server clears ALL stale area previews. */
 export async function updateDesign(id: string, payload: SaveDesignPayload): Promise<DesignProjectDto> {
   return handle(
     await fetch(apiUrl(`/designs/${encodeURIComponent(id)}`), {

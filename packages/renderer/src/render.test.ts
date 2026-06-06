@@ -116,3 +116,93 @@ describe('renderMockup', () => {
     ).rejects.toThrow(RenderValidationError);
   });
 });
+
+describe('renderMockup per print area (multi-area designs)', () => {
+  // The API renders one mockup per placement: each call gets that area's own base
+  // (front photo vs back photo) and that area's rect. These tests prove the renderer
+  // behaves correctly when invoked that way.
+  let backBasePath: string;
+  const backPrintArea = { x: 80, y: 60, width: 240, height: 260 };
+
+  beforeAll(async () => {
+    backBasePath = join(dir, 'back-base.png');
+    await writeFile(
+      backBasePath,
+      await sharp({
+        create: { width: 400, height: 400, channels: 4, background: { r: 120, g: 160, b: 130, alpha: 1 } },
+      })
+        .png()
+        .toBuffer(),
+    );
+  });
+
+  it('renders front and back previews as valid, distinct PNGs', async () => {
+    const front = await renderMockup({
+      baseImagePath: basePath, // area without own image -> caller passed the template base
+      overlayImagePath: overlayPath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [{ imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+    });
+    const back = await renderMockup({
+      baseImagePath: backBasePath, // area-specific view image
+      overlayImagePath: null,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea: backPrintArea,
+      objects: [{ imagePath: logoPath, x: 200, y: 180, width: 90, height: 90, rotation: 20 }],
+    });
+
+    for (const buffer of [front, back]) {
+      expect(buffer.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+      const meta = await sharp(buffer).metadata();
+      expect(meta.format).toBe('png');
+      expect(meta.width).toBe(400);
+      expect(meta.height).toBe(400);
+    }
+
+    // Different base images must yield different previews.
+    expect(front.equals(back)).toBe(false);
+
+    // Back preview shows the green back base outside the print area, not the gray front.
+    const { data } = await sharp(back)
+      .extract({ left: 10, top: 10, width: 1, height: 1 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    expect(data[1]).toBeGreaterThan(140); // green channel of the back base
+  });
+
+  it('validates each call against ITS OWN print area, not another area', async () => {
+    // Top-left corner region: inside the back area (starts at 80,60) but outside the
+    // front area (starts at 100,100).
+    const objectInsideBackOnly = {
+      imagePath: logoPath,
+      x: 95,
+      y: 75,
+      width: 20,
+      height: 20,
+      rotation: 0,
+    };
+    // The back render accepts it...
+    await expect(
+      renderMockup({
+        baseImagePath: backBasePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea: backPrintArea,
+        objects: [objectInsideBackOnly],
+      }),
+    ).resolves.toBeInstanceOf(Buffer);
+    // ...but the front render must refuse the same object.
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [objectInsideBackOnly],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});

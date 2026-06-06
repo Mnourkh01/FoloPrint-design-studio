@@ -12,7 +12,9 @@ export class TemplatesService {
   async findAllActive(): Promise<ProductTemplateDto[]> {
     const templates = await this.prisma.productTemplate.findMany({
       where: { active: true },
-      include: { printAreas: { where: { active: true }, orderBy: { key: 'asc' } } },
+      include: {
+        printAreas: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }] },
+      },
       orderBy: { createdAt: 'asc' },
     });
     return templates.map((t) => this.toDto(t));
@@ -27,7 +29,9 @@ export class TemplatesService {
   async findEntityBySlug(slug: string): Promise<TemplateWithAreas> {
     const template = await this.prisma.productTemplate.findFirst({
       where: { slug, active: true },
-      include: { printAreas: { where: { active: true }, orderBy: { key: 'asc' } } },
+      include: {
+        printAreas: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }] },
+      },
     });
     if (!template) {
       throw new NotFoundException(`Template "${slug}" not found`);
@@ -53,6 +57,14 @@ export class TemplatesService {
         y: area.y,
         width: area.width,
         height: area.height,
+        // Null means "use the template-level image"; the area URLs only exist when the
+        // area carries its own view images. Storage paths never leave the server.
+        imageUrl: area.baseImagePath
+          ? `/templates/${template.slug}/areas/${encodeURIComponent(area.key)}/image`
+          : null,
+        overlayUrl: area.overlayImagePath
+          ? `/templates/${template.slug}/areas/${encodeURIComponent(area.key)}/overlay`
+          : null,
       })),
     };
   }

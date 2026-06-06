@@ -134,6 +134,20 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       expect(raw).not.toMatch(/(^|[^:])\/(home|var|tmp)\//); // no Unix absolute paths
     });
 
+    it('lists the sweatshirt as a second photo template with both areas', async () => {
+      const res = await http().get('/templates').expect(200);
+      const templates = res.body as ProductTemplateDto[];
+      const sweatshirt = templates.find((t) => t.slug === 'classic-sweatshirt');
+      expect(sweatshirt).toBeDefined();
+      expect(sweatshirt!.canvasWidth).toBe(1254);
+      expect(sweatshirt!.overlayBlend).toBe('multiply');
+      expect(sweatshirt!.thumbUrl).toBe('/templates/classic-sweatshirt/thumb');
+      expect(sweatshirt!.printAreas.map((a) => a.key)).toEqual(['front', 'back']);
+
+      const thumb = await fetchPngBuffer('/templates/classic-sweatshirt/thumb');
+      expect(thumb.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    });
+
     it('front area falls back to template images, back area has its own', () => {
       expect(area('front').imageUrl).toBeNull();
       expect(area('front').overlayUrl).toBeNull();

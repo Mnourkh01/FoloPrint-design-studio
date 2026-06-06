@@ -1,5 +1,6 @@
-/**
- * Derives mask / overlay / thumb from the classic-tee blank photos.
+﻿/**
+ * Derives mask / overlay / thumb from a product's blank photos
+ * (<slug>-front.png / <slug>-back.png in the given directory).
  *
  * Mask: BFS flood-fill from the image border over background-like pixels
  * (luma below threshold); everything unreached is garment. Holes inside the
@@ -10,16 +11,23 @@
  * garment mask as alpha. Composited with 'multiply' it re-applies the photo's
  * fabric folds over flat design ink.
  *
- * Run: node build-assets.js <assetsDir> <lumaThreshold>
+ * Run: node build-assets.js <assetsDir> <slug> [lumaThreshold=200]
+ * e.g. node apps/api/prisma/assets/build-assets.js apps/api/prisma/assets/classic-tee classic-tee 200
  */
 const sharp = require('sharp');
 const { join } = require('node:path');
 
 const dir = process.argv[2];
-const THRESHOLD = Number(process.argv[3] ?? 212);
+const SLUG = process.argv[3];
+const THRESHOLD = Number(process.argv[4] ?? 200);
+
+if (!dir || !SLUG) {
+  console.error('usage: node build-assets.js <assetsDir> <slug> [lumaThreshold=200]');
+  process.exit(1);
+}
 
 async function buildSide(side) {
-  const srcPath = join(dir, `classic-tee-${side}.png`);
+  const srcPath = join(dir, `${SLUG}-${side}.png`);
   const { data, info } = await sharp(srcPath).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const { width: w, height: h } = info;
 
@@ -201,7 +209,7 @@ async function buildSide(side) {
   await sharp({ create: { width: w, height: h, channels: 3, background: { r: 255, g: 255, b: 255 } } })
     .joinChannel(alpha, { raw: { width: w, height: h, channels: 1 } })
     .png()
-    .toFile(join(dir, `classic-tee-${side}-mask.png`));
+    .toFile(join(dir, `${SLUG}-${side}-mask.png`));
 
   // --- multiply overlay: luminance / white point, alpha = garment mask ---
   const lumaSamples = [];
@@ -231,10 +239,10 @@ async function buildSide(side) {
     .toColourspace('srgb')
     .joinChannel(alpha, { raw: { width: w, height: h, channels: 1 } })
     .png()
-    .toFile(join(dir, `classic-tee-${side}-overlay.png`));
+    .toFile(join(dir, `${SLUG}-${side}-overlay.png`));
 
   // --- thumb (512: crisp on ~400px cards and small tabs alike) ---
-  await sharp(srcPath).resize(512, 512).png().toFile(join(dir, `classic-tee-${side}-thumb.png`));
+  await sharp(srcPath).resize(512, 512).png().toFile(join(dir, `${SLUG}-${side}-thumb.png`));
 
   console.log(
     JSON.stringify({

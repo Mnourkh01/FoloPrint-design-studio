@@ -152,6 +152,18 @@ keys (`uploads/<uuid>.png`, `previews/<designId>/<areaKey>.png`, `templates/<fil
 means swapping this one class (signed URLs replace streaming endpoints); DB rows already store
 relative keys, so no migration needed.
 
+## Branching and CI merge gate
+
+- `staging` is the default QA branch and is protected by CI: every pull request into
+  `staging` runs the full test matrix (`.github/workflows/ci.yml`) and must pass the
+  required status check **`ci / verify`** before merge.
+- The workflow runs the same checks as local development: `build:packages`,
+  `test:shared`, `test:renderer`, `test:api` (against a Postgres 16 service, migrated
+  with `prisma migrate deploy` + seeded), and `test:web` (Playwright, Chromium).
+- `feature/*` branches are cut from `staging` and merge back via PR only.
+- `main` does not exist yet on purpose: it is reserved for the first stable release and
+  will be created from `staging` when that release is cut. Do not create or push it.
+
 ## Future FoloPrint integration options (decision deferred)
 
 | Option | Shape | Pros | Cons |

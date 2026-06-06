@@ -8,8 +8,12 @@ import {
 import { Prisma } from '@prisma/client';
 import type { DesignProject, PrintArea, ProductTemplate } from '@prisma/client';
 import {
+  collectQualityWarnings,
+  evaluateObjectQuality,
   normalizeDesignDocument,
+  printAreaPpi,
   validateDesignPlacements,
+  worseQualityLevel,
   type AnyDesignDocument,
   type DesignDocument,
   type DesignListDto,
@@ -17,7 +21,9 @@ import {
   type DesignPlacementSummaryDto,
   type DesignPreviewDto,
   type DesignProjectDto,
+  type ObjectQualityWarningDto,
   type PlacementValidationError,
+  type PrintQualityLevel,
   type RenderResultDto,
 } from '@foloprint/shared';
 import { renderMockup } from '@foloprint/renderer';
@@ -36,6 +42,9 @@ interface StoredPreview {
   renderedAt: string;
 }
 type PreviewPathsMap = Record<string, StoredPreview>;
+
+/** Source pixel size of an asset, keyed by id, for the advisory DPI math. */
+type AssetDimsMap = Map<string, { width: number | null; height: number | null }>;
 
 @Injectable()
 export class DesignsService {
@@ -63,8 +72,27 @@ export class DesignsService {
       this.prisma.designProject.count(),
     ]);
 
+    // Parse each row's document once; a corrupt row degrades instead of failing the
+    // page (existing policy). Asset dims for the DPI math are batched: one query for
+    // the whole page, never per row.
+    const documents = new Map<string, DesignDocument>();
+    for (const row of rows) {
+      try {
+        documents.set(row.id, this.normalizedDocumentOf(row));
+      } catch (error) {
+        this.logger.warn(
+          `Design "${row.id}" has an unreadable document; listed without placements: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        );
+      }
+    }
+    const assetDims = await this.assetDimsFor(
+      [...documents.values()].flatMap((d) => d.placements.flatMap((p) => p.objects.map((o) => o.assetId))),
+    );
+
     return {
-      items: rows.map((design) => this.toListItemDto(design)),
+      items: rows.map((design) => this.toListItemDto(design, documents.get(design.id), assetDims)),
       page,
       pageSize,
       totalItems,
@@ -328,17 +356,22 @@ export class DesignsService {
   }
 
   /**
-   * Library row summary: template info, per-area object counts, preview metadata.
-   * Never includes the design document. A row whose stored document cannot be read
-   * degrades to placements: [] instead of failing the whole list; only the design id
-   * and the error message are logged, never the document itself.
+   * Library row summary: template info, per-area object counts, preview metadata,
+   * worst advisory quality level. Never includes the design document. A row whose
+   * stored document could not be read (document undefined) degrades to
+   * placements: [] and worstQualityLevel: null; the parse failure was already
+   * logged by list().
    */
-  private toListItemDto(design: DesignWithTemplate): DesignListItemDto {
+  private toListItemDto(
+    design: DesignWithTemplate,
+    document: DesignDocument | undefined,
+    assetDims: AssetDimsMap,
+  ): DesignListItemDto {
     const template = design.productTemplate;
 
     let placements: DesignPlacementSummaryDto[] = [];
-    try {
-      const document = this.normalizedDocumentOf(design);
+    let worstQualityLevel: PrintQualityLevel | null = null;
+    if (document) {
       const nameOf = new Map(template.printAreas.map((a) => [a.key, a.name]));
       placements = document.placements
         .map((placement) => ({
@@ -347,12 +380,7 @@ export class DesignsService {
           objectCount: placement.objects.length,
         }))
         .sort(this.byAreaOrder(template.printAreas, (s) => s.printAreaKey));
-    } catch (error) {
-      this.logger.warn(
-        `Design "${design.id}" has an unreadable document; listed without placements: ${
-          error instanceof Error ? error.message : 'unknown error'
-        }`,
-      );
+      worstQualityLevel = this.worstQualityLevelOf(document, template.printAreas, assetDims);
     }
 
     return {
@@ -360,9 +388,46 @@ export class DesignsService {
       template: { id: template.id, name: template.name, slug: template.slug },
       placements,
       previews: this.toPreviewDtos(design.id, this.previewPathsOf(design), template.printAreas),
+      worstQualityLevel,
       createdAt: design.createdAt.toISOString(),
       updatedAt: design.updatedAt.toISOString(),
     };
+  }
+
+  /** One batched query for the source pixel sizes the DPI math needs. */
+  private async assetDimsFor(assetIds: string[]): Promise<AssetDimsMap> {
+    const unique = [...new Set(assetIds)];
+    if (unique.length === 0) return new Map();
+    const assets = await this.prisma.uploadedAsset.findMany({
+      where: { id: { in: unique } },
+      select: { id: true, width: true, height: true },
+    });
+    return new Map(assets.map((a) => [a.id, { width: a.width, height: a.height }]));
+  }
+
+  /**
+   * Worst advisory level across the document's evaluable objects; null when nothing
+   * was evaluable (missing asset dims, unknown areas). Advisory only: this never
+   * feeds validation.
+   */
+  private worstQualityLevelOf(
+    document: DesignDocument,
+    printAreas: PrintArea[],
+    assetDims: AssetDimsMap,
+  ): PrintQualityLevel | null {
+    const ppiByKey = new Map(printAreas.map((a) => [a.key, printAreaPpi(a)]));
+    let worst: PrintQualityLevel | null = null;
+    for (const placement of document.placements) {
+      const ppi = ppiByKey.get(placement.printAreaKey) ?? null;
+      for (const object of placement.objects) {
+        const dims = assetDims.get(object.assetId);
+        if (!dims) continue;
+        const quality = evaluateObjectQuality(dims, object, ppi);
+        if (!quality) continue;
+        worst = worst === null ? quality.level : worseQualityLevel(worst, quality.level);
+      }
+    }
+    return worst;
   }
 
   private formatPlacementError(error: PlacementValidationError): string {
@@ -383,17 +448,33 @@ export class DesignsService {
     }
   }
 
-  private toDto(design: DesignWithTemplate): DesignProjectDto {
+  /**
+   * Async because the advisory quality warnings need the source pixel sizes of the
+   * design's assets (one batched query). Warnings are recomputed at read time so a
+   * changed print area spec is always reflected; nothing is persisted.
+   */
+  private async toDto(design: DesignWithTemplate): Promise<DesignProjectDto> {
+    const document = this.normalizedDocumentOf(design);
+    const assetDims = await this.assetDimsFor(
+      document.placements.flatMap((p) => p.objects.map((o) => o.assetId)),
+    );
+    const qualityWarnings: ObjectQualityWarningDto[] = collectQualityWarnings(
+      document.placements,
+      design.productTemplate.printAreas,
+      assetDims,
+    );
+
     return {
       id: design.id,
       templateId: design.productTemplateId,
       templateSlug: design.productTemplate.slug,
-      design: this.normalizedDocumentOf(design),
+      design: document,
       previews: this.toPreviewDtos(
         design.id,
         this.previewPathsOf(design),
         design.productTemplate.printAreas,
       ),
+      qualityWarnings,
       createdAt: design.createdAt.toISOString(),
       updatedAt: design.updatedAt.toISOString(),
     };

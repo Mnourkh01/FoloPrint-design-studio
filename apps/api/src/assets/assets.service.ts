@@ -72,6 +72,12 @@ export class AssetsService {
         ? await pipeline.png({ compressionLevel: 9 }).toBuffer()
         : await pipeline.jpeg({ quality: 92 }).toBuffer();
 
+    // EXIF orientations 5-8 rotate by 90/270: the re-encoded file has swapped
+    // dimensions versus the pre-rotate metadata. Store the dimensions of the bytes
+    // we actually keep; DPI math downstream depends on them being right.
+    const orientation = metadata.orientation ?? 1;
+    const [storedWidth, storedHeight] = orientation >= 5 ? [height, width] : [width, height];
+
     const id = randomUUID();
     const storagePath = `uploads/${id}.${format.ext}`;
     await this.storage.save(storagePath, encoded);
@@ -82,8 +88,8 @@ export class AssetsService {
         originalFilename: this.sanitizeFilename(file.originalname),
         mimeType: format.mime,
         sizeBytes: encoded.length,
-        width,
-        height,
+        width: storedWidth,
+        height: storedHeight,
         storagePath,
       },
     });

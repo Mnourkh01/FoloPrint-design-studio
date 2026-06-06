@@ -82,6 +82,24 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           <dd>{new Date(design.createdAt).toLocaleString()}</dd>
         </dl>
 
+        {design.qualityWarnings.length > 0 && (
+          <div className="quality-warnings" data-testid="quality-warnings">
+            <p className="quality-warnings__title">Print quality</p>
+            <ul>
+              {design.qualityWarnings.map((warning) => (
+                <li
+                  key={`${warning.printAreaKey}-${warning.objectIndex}`}
+                  className={`quality-warnings__item quality-warnings__item--${warning.level}`}
+                >
+                  {areaName(warning.printAreaKey)}, object {warning.objectIndex + 1}: ~
+                  {warning.effectiveDpi} DPI,{' '}
+                  {warning.level === 'poor' ? 'will likely print blurry' : 'may look soft up close'}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="action-row">
           <RenderButton designId={design.id} hasPreviews={design.previews.length > 0} />
           <Link

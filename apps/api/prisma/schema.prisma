@@ -41,6 +41,10 @@ model PrintArea {
   baseImagePath     String?
   /// Area-specific overlay; null falls back to ProductTemplate.overlayImagePath.
   overlayImagePath  String?
+  /// Physical printable width in inches; null = clients assume a 12in DTG platen.
+  widthInches       Float?
+  /// Physical height in inches; null = derived from widthInches keeping canvas aspect.
+  heightInches      Float?
 
   productTemplate ProductTemplate @relation(fields: [productTemplateId], references: [id], onDelete: Cascade)
 

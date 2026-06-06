@@ -80,6 +80,12 @@ export interface PrintAreaDto {
   imageUrl: string | null;
   /** Same fallback rule for the area's overlay image. */
   overlayUrl: string | null;
+  /**
+   * Physical printable width in inches; null means "not configured" and clients
+   * apply the shared fallback (assumed 12in width, aspect-derived height).
+   */
+  widthInches: number | null;
+  heightInches: number | null;
 }
 
 export interface ProductTemplateDto {
@@ -115,6 +121,20 @@ export interface DesignPreviewDto {
   renderedAt: string;
 }
 
+/** Advisory print-quality level for a placed image object. */
+export type PrintQualityLevel = 'ok' | 'warning' | 'poor';
+
+/** Wire shape of one advisory low-resolution warning. Never blocks anything. */
+export interface ObjectQualityWarningDto {
+  printAreaKey: string;
+  /** Index into that placement's objects array. */
+  objectIndex: number;
+  assetId: string;
+  /** Rounded effective print DPI (worse axis). */
+  effectiveDpi: number;
+  level: 'warning' | 'poor';
+}
+
 export interface DesignProjectDto {
   id: string;
   templateId: string;
@@ -123,6 +143,11 @@ export interface DesignProjectDto {
   design: DesignDocument;
   /** One entry per rendered area; empty until the design is rendered. */
   previews: DesignPreviewDto[];
+  /**
+   * Advisory print-quality warnings, recomputed server-side at read time.
+   * Empty when every object is ok or its inputs are unknown.
+   */
+  qualityWarnings: ObjectQualityWarningDto[];
   createdAt: string;
   updatedAt: string;
 }
@@ -159,6 +184,11 @@ export interface DesignListItemDto {
   placements: DesignPlacementSummaryDto[];
   /** Same shape and ordering as DesignProjectDto.previews; empty until rendered. */
   previews: DesignPreviewDto[];
+  /**
+   * Worst advisory quality level across the design's evaluable image objects;
+   * null when nothing was evaluable (unreadable document or missing asset dims).
+   */
+  worstQualityLevel: PrintQualityLevel | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 // Matches the seeded "classic-tee" front print area (apps/api/prisma/seed.ts).
-const FRONT_AREA = { x: 370, y: 300, width: 260, height: 340 } as const;
+const FRONT_AREA = { x: 427, y: 400, width: 400, height: 520 } as const;
 
 interface TextState {
   left: number;

@@ -58,7 +58,7 @@ export default async function HomePage() {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 className="template-card__image"
-                src={apiUrl(template.imageUrl)}
+                src={apiUrl(template.thumbUrl ?? template.imageUrl)}
                 alt={template.name}
               />
               <span className="template-card__body">

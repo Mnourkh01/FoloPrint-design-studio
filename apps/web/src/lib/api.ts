@@ -62,6 +62,15 @@ export async function uploadAsset(file: File): Promise<UploadedAssetDto> {
   return handle(await fetch(apiUrl('/assets/upload'), { method: 'POST', body: form }));
 }
 
+/** Derives a new asset with the flat background removed; the source asset stays intact. */
+export async function removeAssetBackground(assetId: string): Promise<UploadedAssetDto> {
+  return handle(
+    await fetch(apiUrl(`/assets/${encodeURIComponent(assetId)}/remove-background`), {
+      method: 'POST',
+    }),
+  );
+}
+
 export interface SaveDesignPayload {
   templateId: string;
   placements: DesignDocument['placements'];

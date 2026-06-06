@@ -49,4 +49,11 @@ export class AssetsController {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     this.storage.readStream(asset.storagePath).pipe(res);
   }
+
+  /** Derives a new asset with the flat background removed; the source stays intact. */
+  @Post(':id/remove-background')
+  @Throttle({ default: { limit: UPLOAD_THROTTLE_LIMIT, ttl: 60_000 } })
+  removeBackground(@Param('id', ParseUUIDPipe) id: string): Promise<UploadedAssetDto> {
+    return this.assets.removeBackground(id);
+  }
 }

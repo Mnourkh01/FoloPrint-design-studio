@@ -124,12 +124,12 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       const tee = templates.find((t) => t.slug === 'classic-tee');
       expect(tee).toBeDefined();
 
-      expect(tee!.canvasWidth).toBe(1000);
+      expect(tee!.canvasWidth).toBe(1254);
       expect(tee!.printAreas.map((a) => a.key)).toEqual(['front', 'back']); // sortOrder, not key-asc
       expect(tee!.imageUrl).toBe('/templates/classic-tee/image');
 
       const raw = JSON.stringify(res.body);
-      expect(raw).not.toMatch(/storagePath|baseImagePath|overlayImagePath/);
+      expect(raw).not.toMatch(/storagePath|baseImagePath|overlayImagePath|maskImagePath|thumbImagePath/);
       expect(raw).not.toMatch(/[A-Z]:\\\\/); // no Windows absolute paths
       expect(raw).not.toMatch(/(^|[^:])\/(home|var|tmp)\//); // no Unix absolute paths
     });
@@ -206,6 +206,79 @@ describe('FoloPrint Design Studio API (e2e)', () => {
 
     it('rejects requests with no file', async () => {
       await http().post('/assets/upload').expect(400);
+    });
+  });
+
+  describe('POST /assets/:id/remove-background', () => {
+    const makeLogoOnWhite = (): Promise<Buffer> =>
+      sharp({
+        create: { width: 200, height: 200, channels: 4, background: { r: 250, g: 250, b: 248, alpha: 1 } },
+      })
+        .composite([
+          {
+            input: {
+              create: { width: 80, height: 80, channels: 4, background: { r: 190, g: 30, b: 40, alpha: 1 } },
+            },
+            left: 60,
+            top: 60,
+          },
+        ])
+        .png()
+        .toBuffer();
+
+    it('derives a new transparent PNG asset and leaves the source intact', async () => {
+      const upload = await http()
+        .post('/assets/upload')
+        .attach('file', await makeLogoOnWhite(), { filename: 'logo on white.png', contentType: 'image/png' })
+        .expect(201);
+      const source = upload.body as UploadedAssetDto;
+
+      const res = await http().post(`/assets/${source.id}/remove-background`).expect(201);
+      const derived = res.body as UploadedAssetDto;
+      expect(derived.id).not.toBe(source.id);
+      expect(derived.mimeType).toBe('image/png');
+      expect(derived.width).toBe(source.width);
+      expect(derived.height).toBe(source.height);
+      expect(derived.originalFilename).toMatch(/-nobg\.png$/);
+      expect(JSON.stringify(derived)).not.toMatch(/storagePath/);
+
+      // Derived file: background corner transparent, logo center opaque.
+      const derivedPng = await fetchPngBuffer(`/assets/${derived.id}/file`);
+      const { data, info } = await sharp(derivedPng).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const alphaAt = (x: number, y: number) => data[(y * info.width + x) * 4 + 3]!;
+      expect(alphaAt(5, 5)).toBe(0);
+      expect(alphaAt(100, 100)).toBe(255);
+
+      // Source asset is untouched (corner still fully opaque).
+      const sourcePng = await fetchPngBuffer(`/assets/${source.id}/file`);
+      const sourceRaw = await sharp(sourcePng).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      expect(sourceRaw.data[3]!).toBe(255);
+    });
+
+    it('400s on a busy background with a human-readable reason', async () => {
+      // Deterministic pseudo-noise; nothing flat to key off.
+      const noise = Buffer.alloc(200 * 200 * 4);
+      for (let i = 0; i < 200 * 200; i++) {
+        noise[i * 4] = (i * 73) % 256;
+        noise[i * 4 + 1] = (i * 151) % 256;
+        noise[i * 4 + 2] = (i * 211) % 256;
+        noise[i * 4 + 3] = 255;
+      }
+      const busy = await sharp(noise, { raw: { width: 200, height: 200, channels: 4 } }).png().toBuffer();
+      const upload = await http()
+        .post('/assets/upload')
+        .attach('file', busy, { filename: 'photo.png', contentType: 'image/png' })
+        .expect(201);
+
+      const res = await http()
+        .post(`/assets/${(upload.body as UploadedAssetDto).id}/remove-background`)
+        .expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/solid background/i);
+    });
+
+    it('404s for an unknown asset id and 400s for a malformed one', async () => {
+      await http().post('/assets/00000000-0000-4000-8000-000000000000/remove-background').expect(404);
+      await http().post('/assets/not-a-uuid/remove-background').expect(400);
     });
   });
 
@@ -1077,8 +1150,8 @@ describe('FoloPrint Design Studio API (e2e)', () => {
   });
 
   describe('print quality warnings (advisory)', () => {
-    // Seeded front area: 260x340 canvas px over 12 x 15.7 in. The worse axis is Y
-    // (340/15.7 ~ 21.66 px/in), so a square asset filling the area is governed by it.
+    // Seeded front area: 400x520 canvas px over 12 x 15.6 in (uniform ~33.3 px/in).
+    // A square asset filling the area is governed by the taller Y axis (15.6 in).
     const fullFrontObject = (assetId: string) => {
       const front = area('front');
       return {
@@ -1101,9 +1174,9 @@ describe('FoloPrint Design Studio API (e2e)', () => {
 
     it('seeded template carries the physical print sizes', () => {
       expect(area('front').widthInches).toBe(12);
-      expect(area('front').heightInches).toBe(15.7);
+      expect(area('front').heightInches).toBe(15.6);
       expect(area('back').widthInches).toBe(12);
-      expect(area('back').heightInches).toBe(17.5);
+      expect(area('back').heightInches).toBe(16.8);
     });
 
     it('flags a low-res image as poor without blocking save or render', async () => {
@@ -1118,7 +1191,7 @@ describe('FoloPrint Design Studio API (e2e)', () => {
         assetId: tiny.id,
         level: 'poor',
       });
-      // 64px over 15.7in -> ~4 DPI, rounded integer.
+      // 64px over 15.6in -> ~4 DPI, rounded integer.
       expect(warning.effectiveDpi).toBe(4);
 
       // GET returns the same recomputed warnings.
@@ -1131,14 +1204,14 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
 
     it('returns a warning level for mid-res and no warnings for hi-res artwork', async () => {
-      // 2000px over 15.7in -> ~127 DPI: warning band (100..149).
+      // 2000px over 15.6in -> ~128 DPI: warning band (100..149).
       const mid = await uploadPng(2000, 2000);
       const midDesign = await createFrontDesign(fullFrontObject(mid.id));
       expect(midDesign.qualityWarnings).toHaveLength(1);
       expect(midDesign.qualityWarnings[0]!.level).toBe('warning');
-      expect(midDesign.qualityWarnings[0]!.effectiveDpi).toBe(127);
+      expect(midDesign.qualityWarnings[0]!.effectiveDpi).toBe(128);
 
-      // 2400px over 15.7in -> ~153 DPI: ok, list stays empty.
+      // 2400px over 15.6in -> ~154 DPI: ok, list stays empty.
       const hi = await uploadPng(2400, 2400);
       const hiDesign = await createFrontDesign(fullFrontObject(hi.id));
       expect(hiDesign.qualityWarnings).toEqual([]);

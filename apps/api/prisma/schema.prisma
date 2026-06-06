@@ -13,6 +13,12 @@ model ProductTemplate {
   slug             String   @unique
   baseImagePath    String
   overlayImagePath String?
+  /// Garment silhouette mask for photo templates; design ink is clipped to its alpha.
+  maskImagePath    String?
+  /// Overlay blend mode: 'over' (legacy alpha), 'multiply' (shadows), 'soft-light' (sheen).
+  overlayBlend     String   @default("over")
+  /// Small preview of the base image for cards and tabs; null = clients use the full image.
+  thumbImagePath   String?
   canvasWidth      Int
   canvasHeight     Int
   active           Boolean  @default(true)
@@ -41,6 +47,12 @@ model PrintArea {
   baseImagePath     String?
   /// Area-specific overlay; null falls back to ProductTemplate.overlayImagePath.
   overlayImagePath  String?
+  /// Area-specific garment mask; null falls back to ProductTemplate.maskImagePath.
+  maskImagePath     String?
+  /// Area-specific overlay blend; null falls back to ProductTemplate.overlayBlend.
+  overlayBlend      String?
+  /// Area-specific thumb; null falls back to ProductTemplate.thumbImagePath.
+  thumbImagePath    String?
   /// Physical printable width in inches; null = clients assume a 12in DTG platen.
   widthInches       Float?
   /// Physical height in inches; null = derived from widthInches keeping canvas aspect.

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { ConfigService } from '@nestjs/config';
 import type { UploadedAsset } from '@prisma/client';
 import type { UploadedAssetDto } from '@foloprint/shared';
+import { FlatBackgroundError, removeFlatBackground } from '@foloprint/renderer';
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import sharp from 'sharp';
@@ -103,6 +104,53 @@ export class AssetsService {
       throw new NotFoundException(`Asset "${id}" not found`);
     }
     return asset;
+  }
+
+  /**
+   * Derives a NEW asset with the flat background removed (flood fill from the
+   * border; see the renderer util). The source asset is never mutated, so the
+   * editor can always swap back. A busy/photographic background maps to a 400
+   * with the renderer's human-readable reason.
+   */
+  async removeBackground(id: string): Promise<UploadedAssetDto> {
+    const source = await this.findById(id);
+    const bytes = await this.storage.read(source.storagePath);
+
+    let png: Buffer;
+    try {
+      ({ png } = await removeFlatBackground(bytes));
+    } catch (error) {
+      if (error instanceof FlatBackgroundError) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+
+    // Always PNG (alpha required), dimensions read from the produced bytes.
+    const meta = await sharp(png).metadata();
+    const newId = randomUUID();
+    const storagePath = `uploads/${newId}.png`;
+    await this.storage.save(storagePath, png);
+
+    const derived = await this.prisma.uploadedAsset.create({
+      data: {
+        id: newId,
+        originalFilename: this.derivedFilename(source.originalFilename),
+        mimeType: 'image/png',
+        sizeBytes: png.length,
+        width: meta.width ?? source.width,
+        height: meta.height ?? source.height,
+        storagePath,
+      },
+    });
+
+    return this.toDto(derived);
+  }
+
+  /** "logo.png" -> "logo-nobg.png"; keeps the sanitizer's character set. */
+  private derivedFilename(original: string): string {
+    const stem = original.replace(/\.(png|jpe?g)$/i, '');
+    return this.sanitizeFilename(`${stem}-nobg.png`);
   }
 
   /** Display-only name: path stripped, control/special characters removed, length-capped. */

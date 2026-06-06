@@ -17,6 +17,7 @@ import {
   type DesignObject,
   type DesignPlacement,
   type DesignProjectDto,
+  type OverlayBlend,
   type PrintAreaDto,
   type PrintQualityLevel,
   type ProductTemplateDto,
@@ -28,6 +29,7 @@ import {
   apiUrl,
   assetFileUrl,
   fontFileUrl,
+  removeAssetBackground,
   renderDesign,
   saveDesign,
   updateDesign,
@@ -35,6 +37,17 @@ import {
 } from '@/lib/api';
 
 const STAGE_WIDTH = 680;
+
+/**
+ * Canvas2D composite operation per contract overlay blend, so the live editor
+ * shades the artwork exactly like the server render (sharp uses the same Porter-
+ * Duff/PDF operators under these names).
+ */
+const FABRIC_OVERLAY_BLEND: Record<OverlayBlend, GlobalCompositeOperation> = {
+  over: 'source-over',
+  multiply: 'multiply',
+  'soft-light': 'soft-light',
+};
 
 /**
  * Print-area boundary styling: quiet at rest so the garment mockup carries the view,
@@ -180,6 +193,13 @@ const CONTEXT_TOOL_ICONS = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
       <rect x="4" y="4" width="16" height="16" rx="2" />
       <path d="M12 8v8M8 12h8" />
+    </svg>
+  ),
+  'remove-bg': (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M7 20h12" />
+      <path d="M5.5 13.5l8-8a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8l-8 8H7.7a2 2 0 0 1-1.4-.6l-.8-.8a2 2 0 0 1 0-2.8z" />
+      <path d="M10 9l5 5" />
     </svg>
   ),
 };
@@ -341,7 +361,7 @@ export function EditorClient({
   const [designId, setDesignId] = useState<string | null>(initialDesign?.id ?? null);
   /** True when ANY area differs from what the server has for designId (dirty is global). */
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<'upload' | 'save' | 'render' | null>(null);
+  const [busy, setBusy] = useState<'upload' | 'save' | 'render' | 'removebg' | null>(null);
 
   /** Active tool in the left rail; selecting a canvas object follows its kind. */
   const [tool, setTool] = useState<StudioTool>('uploads');
@@ -889,9 +909,14 @@ export function EditorClient({
     const overlayUrl = area.overlayUrl ?? template.overlayUrl;
     if (overlayUrl) {
       const overlayCacheKey = area.overlayUrl ? area.key : '';
+      // Blend follows the same area -> template fallback as the overlay asset. Set on
+      // every activation: the cached template-level image is shared across areas
+      // whose blends may differ.
+      const blend = FABRIC_OVERLAY_BLEND[area.overlayBlend ?? template.overlayBlend];
       loadViewImage(overlayCacheRef.current, overlayCacheKey, overlayUrl)
         .then((img) => {
           if (cancelled) return;
+          img.set({ globalCompositeOperation: blend });
           canvas.overlayImage = img;
           canvas.requestRenderAll();
         })
@@ -957,6 +982,54 @@ export function EditorClient({
     } finally {
       setBusy(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  /**
+   * Swaps the selected image for a server-derived copy with the flat background
+   * removed. Same pixel dimensions, so position/scale/rotation carry over exactly;
+   * the original upload stays intact (delete + re-upload is the undo).
+   */
+  const handleRemoveBackground = async () => {
+    const canvas = canvasRef.current;
+    const active = canvas?.getActiveObject() as (DesignedObject & FabricImage) | undefined;
+    if (!canvas || active?.kind !== 'image' || !active.assetId) return;
+    setBusy('removebg');
+    setStatus({ tone: 'info', message: 'Removing the background...' });
+    try {
+      const derived = await removeAssetBackground(active.assetId);
+      const img = (await FabricImage.fromURL(apiUrl(derived.url), {
+        crossOrigin: 'anonymous',
+      })) as DesignedObject & FabricImage;
+      img.set({
+        originX: 'center',
+        originY: 'center',
+        left: active.left,
+        top: active.top,
+        scaleX: active.scaleX,
+        scaleY: active.scaleY,
+        angle: active.angle,
+      });
+      applySelectionStyle(img);
+      img.kind = 'image';
+      img.assetId = derived.id;
+      img.printAreaKey = active.printAreaKey;
+      canvas.remove(active);
+      canvas.add(img);
+      canvas.setActiveObject(img);
+      canvas.requestRenderAll();
+      readSelection(img);
+      refreshAreaCounts();
+      setDirty(true);
+      setStatus({ tone: 'success', message: 'Background removed. The original upload is untouched.' });
+    } catch (error) {
+      setStatus({
+        tone: 'error',
+        message: error instanceof ApiError ? error.message : 'Background removal failed.',
+        details: error instanceof ApiError ? error.details : undefined,
+      });
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -1607,7 +1680,7 @@ export function EditorClient({
               <p className="studio__panel-title">Product</p>
               <div className="studio__panel-product">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(template.imageUrl)} alt={template.name} width={56} height={56} />
+                <img src={apiUrl(template.thumbUrl ?? template.imageUrl)} alt={template.name} width={56} height={56} />
                 <div>
                   <b>{template.name}</b>
                   <span>
@@ -1784,6 +1857,18 @@ export function EditorClient({
                   <span>{key === 'transform' ? 'Transform' : 'Position'}</span>
                 </button>
               ))}
+              {selection.kind === 'image' && (
+                <button
+                  type="button"
+                  data-testid="context-tool-remove-bg"
+                  className="studio__context-tool"
+                  disabled={busy !== null}
+                  onClick={() => void handleRemoveBackground()}
+                >
+                  {CONTEXT_TOOL_ICONS['remove-bg']}
+                  <span>{busy === 'removebg' ? 'Removing...' : 'Remove background'}</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -1912,7 +1997,7 @@ export function EditorClient({
             >
               <span className="area-tab__thumb">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
+                <img src={apiUrl(a.thumbUrl ?? template.thumbUrl ?? a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
               </span>
               {a.name}
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}

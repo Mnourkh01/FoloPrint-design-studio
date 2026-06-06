@@ -29,7 +29,7 @@ import {
   type RenderResultDto,
   type StoredDesignPlacement,
 } from '@foloprint/shared';
-import { renderMockup, type RenderObject } from '@foloprint/renderer';
+import { renderMockup, type OverlayBlend, type RenderObject } from '@foloprint/renderer';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import type { CreateDesignDto, DesignObjectDto } from './dto/create-design.dto';
@@ -290,15 +290,21 @@ export class DesignsService {
         };
       });
 
-      // Area-specific view images with template-level fallback.
+      // Area-specific view images with template-level fallback; the mask and the
+      // overlay blend follow the same rule. The renderer validates the blend value,
+      // so a bad seed/config fails loudly instead of rendering wrong.
       const baseImagePath = area.baseImagePath ?? template.baseImagePath;
       const overlayImagePath = area.overlayImagePath ?? template.overlayImagePath;
+      const maskImagePath = area.maskImagePath ?? template.maskImagePath;
+      const overlayBlend = (area.overlayBlend ?? template.overlayBlend) as OverlayBlend;
 
       let png: Buffer;
       try {
         png = await renderMockup({
           baseImagePath: this.storage.resolvePath(baseImagePath),
           overlayImagePath: overlayImagePath ? this.storage.resolvePath(overlayImagePath) : null,
+          overlayBlend,
+          maskImagePath: maskImagePath ? this.storage.resolvePath(maskImagePath) : null,
           canvasWidth: template.canvasWidth,
           canvasHeight: template.canvasHeight,
           printArea: area,

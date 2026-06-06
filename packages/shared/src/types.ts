@@ -136,6 +136,15 @@ export type AnyDesignDocument = DesignDocumentV1 | StoredDesignDocumentV2;
 // API response shapes (what the web app consumes; never contains fs paths)
 // ---------------------------------------------------------------------------
 
+/**
+ * How a template's overlay composites over the artwork. 'over' is plain alpha
+ * (legacy SVG templates), 'multiply' darkens (photographic shadows and folds),
+ * 'soft-light' is a gentler sheen. The renderer and the editor both honor it so
+ * the live canvas matches the server mockup.
+ */
+export const OVERLAY_BLENDS = ['over', 'multiply', 'soft-light'] as const;
+export type OverlayBlend = (typeof OVERLAY_BLENDS)[number];
+
 export interface PrintAreaDto {
   id: string;
   key: string;
@@ -151,6 +160,10 @@ export interface PrintAreaDto {
   imageUrl: string | null;
   /** Same fallback rule for the area's overlay image. */
   overlayUrl: string | null;
+  /** Same fallback rule for the area's card/tab thumb. */
+  thumbUrl: string | null;
+  /** Area-specific overlay blend; null falls back to the template's overlayBlend. */
+  overlayBlend: OverlayBlend | null;
   /**
    * Physical printable width in inches; null means "not configured" and clients
    * apply the shared fallback (assumed 12in width, aspect-derived height).
@@ -169,6 +182,10 @@ export interface ProductTemplateDto {
   imageUrl: string;
   /** Relative API URL streaming the overlay image, if the template has one. */
   overlayUrl: string | null;
+  /** Relative API URL streaming a small card/tab thumb; null = use the full image. */
+  thumbUrl: string | null;
+  /** How overlays composite over the artwork ('over' unless the template says otherwise). */
+  overlayBlend: OverlayBlend;
   printAreas: PrintAreaDto[];
 }
 

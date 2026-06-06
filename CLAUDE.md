@@ -37,8 +37,16 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
 - Server is the authority: every upload and design is re-validated server-side, per placement
   against its own print area. Client clamping is UX only.
 - API never returns filesystem paths. Files stream through `/assets/:id/file`,
-  `/templates/:slug/image|overlay`, `/templates/:slug/areas/:key/image|overlay`,
+  `/templates/:slug/image|overlay|thumb`, `/templates/:slug/areas/:key/image|overlay|thumb`,
   `/designs/:id/preview/:printAreaKey`, `/fonts/:key/file`.
+- Photo templates (v1.7B): template/area carry an optional garment `mask` (design ink is
+  clipped to its alpha at render time) and an `overlayBlend` ('over'|'multiply'|'soft-light');
+  the editor mirrors the blend with a canvas composite op so live view matches the server
+  render. Source blanks + the derivation script live in `apps/api/prisma/assets/`; the seed
+  copies them into storage.
+- Background removal (`POST /assets/:id/remove-background`) derives a NEW png asset by
+  border flood-fill (flat backgrounds only, renderer `removeFlatBackground`); the source
+  asset is immutable.
 - Design objects are a discriminated union on `type: "image" | "text"`; a stored object
   without `type` is a legacy image and normalizes at read time. Text fonts come from the
   shared whitelist (`packages/shared/src/fonts.ts`); binaries live in

@@ -772,6 +772,11 @@ button {
   color: var(--accent);
 }
 
+.studio__context-tool:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
 /* Floating tool panel anchored under the contextual toolbar. */
 .studio__object-panel {
   position: absolute;

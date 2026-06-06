@@ -117,6 +117,129 @@ describe('renderMockup', () => {
   });
 });
 
+describe('renderMockup mask and overlay blend (photo templates)', () => {
+  let maskPath: string;
+
+  beforeAll(async () => {
+    // Garment mask: opaque ONLY over the left half of the print area (x 100..200).
+    // Ink right of x=200 must vanish, as if the garment edge ran down the middle.
+    maskPath = join(dir, 'mask.png');
+    const maskRect = await sharp({
+      create: { width: 100, height: 200, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
+    })
+      .png()
+      .toBuffer();
+    await writeFile(
+      maskPath,
+      await sharp({
+        create: { width: 400, height: 400, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+      })
+        .composite([{ input: maskRect, left: 100, top: 100 }])
+        .png()
+        .toBuffer(),
+    );
+  });
+
+  it('clips design ink to the mask alpha', async () => {
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      maskImagePath: maskPath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      // Red logo spans x 150..250: half inside the mask, half outside.
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+    });
+
+    const probe = async (left: number) =>
+      (
+        await sharp(buffer)
+          .extract({ left, top: 200, width: 1, height: 1 })
+          .raw()
+          .toBuffer({ resolveWithObject: true })
+      ).data;
+
+    const inside = await probe(170); // masked-in: red ink stays
+    expect(inside[0]).toBeGreaterThan(150);
+    expect(inside[1]).toBeLessThan(120);
+
+    const outside = await probe(230); // masked-out: plain gray base shows through
+    expect(outside[0]).toBeGreaterThan(200);
+    expect(outside[1]).toBeGreaterThan(200);
+  });
+
+  it('multiply overlay darkens the base instead of pasting over it', async () => {
+    // 50% gray, fully opaque: multiply halves every channel; plain 'over' would
+    // replace the canvas with flat gray instead.
+    const grayOverlayPath = join(dir, 'gray-overlay.png');
+    await writeFile(
+      grayOverlayPath,
+      await sharp({
+        create: { width: 400, height: 400, channels: 4, background: { r: 128, g: 128, b: 128, alpha: 1 } },
+      })
+        .png()
+        .toBuffer(),
+    );
+
+    const buffer = await renderMockup({
+      baseImagePath: basePath, // gray 230
+      overlayImagePath: grayOverlayPath,
+      overlayBlend: 'multiply',
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+    });
+
+    // Outside the design: base 230 * 128/255 ~ 115.
+    const { data: corner } = await sharp(buffer)
+      .extract({ left: 10, top: 10, width: 1, height: 1 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    expect(corner[0]).toBeGreaterThan(95);
+    expect(corner[0]).toBeLessThan(135);
+
+    // The red ink darkens too (multiply re-applies shadows over the print).
+    const { data: ink } = await sharp(buffer)
+      .extract({ left: 200, top: 200, width: 1, height: 1 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    expect(ink[0]).toBeGreaterThan(60);
+    expect(ink[0]).toBeLessThan(140); // 200 * 128/255 ~ 100
+  });
+
+  it('rejects an unknown overlay blend', async () => {
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        overlayImagePath: overlayPath,
+        overlayBlend: 'screen' as never,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+
+  it('mask and multiply overlay combine into a canvas-sized PNG', async () => {
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      overlayImagePath: overlayPath,
+      overlayBlend: 'multiply',
+      maskImagePath: maskPath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 180, y: 200, width: 60, height: 60, rotation: 15 }],
+    });
+    expect(buffer.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    const meta = await sharp(buffer).metadata();
+    expect(meta.width).toBe(400);
+    expect(meta.height).toBe(400);
+  });
+});
+
 describe('renderMockup per print area (multi-area designs)', () => {
   // The API renders one mockup per placement: each call gets that area's own base
   // (front photo vs back photo) and that area's rect. These tests prove the renderer

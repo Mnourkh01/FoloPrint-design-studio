@@ -1,8 +1,21 @@
 import sharp from 'sharp';
-import { HEX_COLOR_PATTERN, isObjectInsideRect, type Rect, type TextAlign } from '@foloprint/shared';
+import {
+  HEX_COLOR_PATTERN,
+  isObjectInsideRect,
+  OVERLAY_BLENDS,
+  type OverlayBlend,
+  type Rect,
+  type TextAlign,
+} from '@foloprint/shared';
 import { resolveFont, UnknownFontError } from './fonts';
 
 export { resolveFont, UnknownFontError, type ResolvedFont } from './fonts';
+export { OVERLAY_BLENDS, type OverlayBlend } from '@foloprint/shared';
+export {
+  FlatBackgroundError,
+  removeFlatBackground,
+  type RemoveBackgroundResult,
+} from './remove-background';
 
 /** Defensive cap against pixel bombs reaching libvips. */
 const MAX_INPUT_PIXELS = 50_000_000;
@@ -62,6 +75,14 @@ export interface RenderMockupOptions {
   baseImagePath: string;
   /** Absolute path to an overlay image composited above the artwork (shadows, fabric sheen). */
   overlayImagePath?: string | null;
+  /** Overlay blend mode; defaults to 'over' (legacy alpha composite). */
+  overlayBlend?: OverlayBlend;
+  /**
+   * Absolute path to a garment silhouette mask. The design ink is clipped to the
+   * mask's alpha (opaque = printable garment, transparent = background), so artwork
+   * near a garment edge never bleeds onto the backdrop of a photo-based template.
+   */
+  maskImagePath?: string | null;
   canvasWidth: number;
   canvasHeight: number;
   /** Print area in canvas px. Every object must be fully inside it. */
@@ -240,19 +261,33 @@ function assertRenderableObject(obj: RenderObject, index: number, printArea: Rec
   }
 }
 
+/** Loads a canvas-sized RGBA buffer from a template asset path (base, overlay, mask). */
+async function loadCanvasSizedImage(path: string, width: number, height: number): Promise<Buffer> {
+  return sharp(path, { limitInputPixels: MAX_INPUT_PIXELS })
+    .resize(width, height, { fit: 'fill' })
+    .ensureAlpha()
+    .png()
+    .toBuffer();
+}
+
 /**
  * Compose a 2D product mockup PNG:
  * base image (resized to canvas) -> design objects (image or text, resized, rotated,
- * positioned) -> overlay.
+ * positioned, optionally clipped to the garment mask) -> overlay (blend mode per
+ * template; multiply re-applies photographic shadows over the ink).
  *
  * Throws RenderValidationError when an object lies outside the print area; the renderer refuses
  * to draw unvalidated geometry even if a caller forgot to validate.
  */
 export async function renderMockup(options: RenderMockupOptions): Promise<Buffer> {
   const { canvasWidth, canvasHeight, printArea, objects } = options;
+  const overlayBlend = options.overlayBlend ?? 'over';
 
   if (!Number.isInteger(canvasWidth) || !Number.isInteger(canvasHeight) || canvasWidth <= 0 || canvasHeight <= 0) {
     throw new RenderValidationError('Canvas dimensions must be positive integers');
+  }
+  if (!OVERLAY_BLENDS.includes(overlayBlend)) {
+    throw new RenderValidationError(`Unknown overlay blend "${String(overlayBlend)}"`);
   }
   if (objects.length === 0) {
     throw new RenderValidationError('Design has no objects to render');
@@ -265,20 +300,34 @@ export async function renderMockup(options: RenderMockupOptions): Promise<Buffer
     .resize(canvasWidth, canvasHeight, { fit: 'fill' })
     .ensureAlpha();
 
-  const layers: sharp.OverlayOptions[] = [];
+  const designLayers: sharp.OverlayOptions[] = [];
 
   for (const obj of objects) {
     const prepared = obj.type === 'text' ? await prepareTextLayer(obj) : await prepareImageLayer(obj);
-    layers.push({ input: prepared.input, left: prepared.left, top: prepared.top });
+    designLayers.push({ input: prepared.input, left: prepared.left, top: prepared.top });
+  }
+
+  const layers: sharp.OverlayOptions[] = [];
+
+  if (options.maskImagePath) {
+    // Flatten the design onto a transparent canvas-sized sheet, then keep only the
+    // pixels where the mask is opaque (dest-in). One masked sheet replaces the
+    // individual layers; their relative stacking is already baked in.
+    const mask = await loadCanvasSizedImage(options.maskImagePath, canvasWidth, canvasHeight);
+    const sheet = await sharp({
+      create: { width: canvasWidth, height: canvasHeight, channels: 4, background: TRANSPARENT },
+    })
+      .composite([...designLayers, { input: mask, left: 0, top: 0, blend: 'dest-in' }])
+      .png()
+      .toBuffer();
+    layers.push({ input: sheet, left: 0, top: 0 });
+  } else {
+    layers.push(...designLayers);
   }
 
   if (options.overlayImagePath) {
-    const overlay = await sharp(options.overlayImagePath, { limitInputPixels: MAX_INPUT_PIXELS })
-      .resize(canvasWidth, canvasHeight, { fit: 'fill' })
-      .ensureAlpha()
-      .png()
-      .toBuffer();
-    layers.push({ input: overlay, left: 0, top: 0 });
+    const overlay = await loadCanvasSizedImage(options.overlayImagePath, canvasWidth, canvasHeight);
+    layers.push({ input: overlay, left: 0, top: 0, blend: overlayBlend });
   }
 
   return base.composite(layers).png().toBuffer();

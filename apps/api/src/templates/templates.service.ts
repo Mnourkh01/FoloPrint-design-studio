@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { PrintArea, ProductTemplate } from '@prisma/client';
-import type { ProductTemplateDto } from '@foloprint/shared';
+import type { OverlayBlend, ProductTemplateDto } from '@foloprint/shared';
 import { PrismaService } from '../prisma/prisma.service';
 
 type TemplateWithAreas = ProductTemplate & { printAreas: PrintArea[] };
@@ -49,6 +49,9 @@ export class TemplatesService {
       canvasHeight: template.canvasHeight,
       imageUrl: `/templates/${template.slug}/image`,
       overlayUrl: template.overlayImagePath ? `/templates/${template.slug}/overlay` : null,
+      thumbUrl: template.thumbImagePath ? `/templates/${template.slug}/thumb` : null,
+      // Stored as a string column; the seed only writes contract values.
+      overlayBlend: template.overlayBlend as OverlayBlend,
       printAreas: template.printAreas.map((area) => ({
         id: area.id,
         key: area.key,
@@ -68,6 +71,10 @@ export class TemplatesService {
         overlayUrl: area.overlayImagePath
           ? `/templates/${template.slug}/areas/${encodeURIComponent(area.key)}/overlay`
           : null,
+        thumbUrl: area.thumbImagePath
+          ? `/templates/${template.slug}/areas/${encodeURIComponent(area.key)}/thumb`
+          : null,
+        overlayBlend: area.overlayBlend as OverlayBlend | null,
       })),
     };
   }

@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AssetsModule } from './assets/assets.module';
 import { DesignsModule } from './designs/designs.module';
+import { FontsModule } from './fonts/fonts.module';
 import { HealthController } from './health/health.controller';
 import { PrismaModule } from './prisma/prisma.module';
 import { StorageModule } from './storage/storage.module';
@@ -21,6 +22,7 @@ import { TemplatesModule } from './templates/templates.module';
     TemplatesModule,
     AssetsModule,
     DesignsModule,
+    FontsModule,
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

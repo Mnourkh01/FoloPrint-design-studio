@@ -38,7 +38,12 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   against its own print area. Client clamping is UX only.
 - API never returns filesystem paths. Files stream through `/assets/:id/file`,
   `/templates/:slug/image|overlay`, `/templates/:slug/areas/:key/image|overlay`,
-  `/designs/:id/preview/:printAreaKey`.
+  `/designs/:id/preview/:printAreaKey`, `/fonts/:key/file`.
+- Design objects are a discriminated union on `type: "image" | "text"`; a stored object
+  without `type` is a legacy image and normalizes at read time. Text fonts come from the
+  shared whitelist (`packages/shared/src/fonts.ts`); binaries live in
+  `packages/renderer/fonts/<key>/` (OFL/Apache only, license file checked in) and only the
+  renderer touches them (`resolveFont`).
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

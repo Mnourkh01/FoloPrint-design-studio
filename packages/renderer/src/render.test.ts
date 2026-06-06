@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+﻿import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
@@ -60,7 +60,7 @@ describe('renderMockup', () => {
       canvasWidth: 400,
       canvasHeight: 400,
       printArea,
-      objects: [{ imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 30 }],
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 30 }],
     });
 
     expect(buffer.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
@@ -85,7 +85,7 @@ describe('renderMockup', () => {
       canvasWidth: 400,
       canvasHeight: 400,
       printArea,
-      objects: [{ imagePath: logoPath, x: 150, y: 150, width: 80, height: 60, rotation: 0 }],
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 150, y: 150, width: 80, height: 60, rotation: 0 }],
     });
     const meta = await sharp(buffer).metadata();
     expect(meta.width).toBe(400);
@@ -99,7 +99,7 @@ describe('renderMockup', () => {
         canvasWidth: 400,
         canvasHeight: 400,
         printArea,
-        objects: [{ imagePath: logoPath, x: 350, y: 350, width: 100, height: 100, rotation: 0 }],
+        objects: [{ type: 'image' as const, imagePath: logoPath, x: 350, y: 350, width: 100, height: 100, rotation: 0 }],
       }),
     ).rejects.toThrow(RenderValidationError);
   });
@@ -143,7 +143,7 @@ describe('renderMockup per print area (multi-area designs)', () => {
       canvasWidth: 400,
       canvasHeight: 400,
       printArea,
-      objects: [{ imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
     });
     const back = await renderMockup({
       baseImagePath: backBasePath, // area-specific view image
@@ -151,7 +151,7 @@ describe('renderMockup per print area (multi-area designs)', () => {
       canvasWidth: 400,
       canvasHeight: 400,
       printArea: backPrintArea,
-      objects: [{ imagePath: logoPath, x: 200, y: 180, width: 90, height: 90, rotation: 20 }],
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 180, width: 90, height: 90, rotation: 20 }],
     });
 
     for (const buffer of [front, back]) {
@@ -177,6 +177,7 @@ describe('renderMockup per print area (multi-area designs)', () => {
     // Top-left corner region: inside the back area (starts at 80,60) but outside the
     // front area (starts at 100,100).
     const objectInsideBackOnly = {
+      type: 'image' as const,
       imagePath: logoPath,
       x: 95,
       y: 75,

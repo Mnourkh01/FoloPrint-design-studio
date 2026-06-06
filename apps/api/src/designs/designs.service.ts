@@ -18,6 +18,7 @@ import {
   type DesignDocument,
   type DesignListDto,
   type DesignListItemDto,
+  type DesignObject,
   type DesignPlacementSummaryDto,
   type DesignPreviewDto,
   type DesignProjectDto,
@@ -25,11 +26,12 @@ import {
   type PlacementValidationError,
   type PrintQualityLevel,
   type RenderResultDto,
+  type StoredDesignPlacement,
 } from '@foloprint/shared';
-import { renderMockup } from '@foloprint/renderer';
+import { renderMockup, type RenderObject } from '@foloprint/renderer';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
-import type { CreateDesignDto } from './dto/create-design.dto';
+import type { CreateDesignDto, DesignObjectDto } from './dto/create-design.dto';
 
 type DesignWithTemplate = DesignProject & {
   productTemplate: ProductTemplate & { printAreas: PrintArea[] };
@@ -88,7 +90,7 @@ export class DesignsService {
       }
     }
     const assetDims = await this.assetDimsFor(
-      [...documents.values()].flatMap((d) => d.placements.flatMap((p) => p.objects.map((o) => o.assetId))),
+      [...documents.values()].flatMap((d) => this.imageAssetIdsOf(d.placements)),
     );
 
     return {
@@ -161,8 +163,12 @@ export class DesignsService {
     }
 
     // The validator gets ALL areas with their active flag so that "inactive" and
-    // "unknown" produce distinct, accurate error messages.
-    const validation = validateDesignPlacements(dto.placements, template.printAreas);
+    // "unknown" produce distinct, accurate error messages. The DTO shape matches the
+    // stored-object union structurally; the validator's runtime checks are the authority.
+    const validation = validateDesignPlacements(
+      dto.placements as unknown as StoredDesignPlacement[],
+      template.printAreas,
+    );
     if (!validation.valid) {
       throw new BadRequestException({
         message: 'Design validation failed',
@@ -170,23 +176,44 @@ export class DesignsService {
       });
     }
 
-    await this.assertAssetsExist(dto.placements.flatMap((p) => p.objects.map((o) => o.assetId)));
+    await this.assertAssetsExist(this.imageAssetIdsOf(dto.placements));
 
     return {
       version: 2,
       templateId: template.id,
       placements: dto.placements.map((placement) => ({
         printAreaKey: placement.printAreaKey,
-        objects: placement.objects.map((o) => ({
-          assetId: o.assetId,
-          x: o.x,
-          y: o.y,
-          width: o.width,
-          height: o.height,
-          rotation: o.rotation,
-        })),
+        objects: placement.objects.map((o) => this.toDocumentObject(o)),
       })),
     };
+  }
+
+  /**
+   * Maps one validated DTO object to its document shape with explicit field picking
+   * (never a spread: a spread would persist whatever extra keys survived transforms).
+   * A missing type is a legacy image payload.
+   */
+  private toDocumentObject(o: DesignObjectDto): DesignObject {
+    const base = { x: o.x, y: o.y, width: o.width, height: o.height, rotation: o.rotation };
+    if (o.type === 'text') {
+      return {
+        type: 'text',
+        text: o.text!,
+        fontFamily: o.fontFamily!,
+        fontSize: o.fontSize!,
+        color: o.color!,
+        align: o.align!,
+        ...base,
+      };
+    }
+    return { type: 'image', assetId: o.assetId!, ...base };
+  }
+
+  /** Asset ids referenced by image objects; text objects reference no assets. */
+  private imageAssetIdsOf(placements: { objects: { type?: string; assetId?: string }[] }[]): string[] {
+    return placements.flatMap((p) =>
+      p.objects.filter((o) => o.type !== 'text' && o.assetId).map((o) => o.assetId!),
+    );
   }
 
   async findById(id: string): Promise<DesignProjectDto> {
@@ -212,7 +239,7 @@ export class DesignsService {
       });
     }
 
-    const assetIds = [...new Set(document.placements.flatMap((p) => p.objects.map((o) => o.assetId)))];
+    const assetIds = [...new Set(this.imageAssetIdsOf(document.placements))];
     const assets = await this.prisma.uploadedAsset.findMany({ where: { id: { in: assetIds } } });
     const assetById = new Map(assets.map((a) => [a.id, a]));
     const areaByKey = new Map(template.printAreas.map((a) => [a.key, a]));
@@ -223,7 +250,20 @@ export class DesignsService {
     for (const placement of document.placements) {
       const area = areaByKey.get(placement.printAreaKey)!; // validated above
 
-      const objects = placement.objects.map((obj, index) => {
+      const objects = placement.objects.map((obj, index): RenderObject => {
+        const base = { x: obj.x, y: obj.y, width: obj.width, height: obj.height, rotation: obj.rotation };
+        if (obj.type === 'text') {
+          // The renderer resolves the whitelist key to its bundled font file itself.
+          return {
+            type: 'text',
+            text: obj.text,
+            fontFamily: obj.fontFamily,
+            fontSize: obj.fontSize,
+            color: obj.color,
+            align: obj.align,
+            ...base,
+          };
+        }
         const asset = assetById.get(obj.assetId);
         if (!asset) {
           throw new BadRequestException(
@@ -231,12 +271,9 @@ export class DesignsService {
           );
         }
         return {
+          type: 'image',
           imagePath: this.storage.resolvePath(asset.storagePath),
-          x: obj.x,
-          y: obj.y,
-          width: obj.width,
-          height: obj.height,
-          rotation: obj.rotation,
+          ...base,
         };
       });
 
@@ -374,11 +411,16 @@ export class DesignsService {
     if (document) {
       const nameOf = new Map(template.printAreas.map((a) => [a.key, a.name]));
       placements = document.placements
-        .map((placement) => ({
-          printAreaKey: placement.printAreaKey,
-          printAreaName: nameOf.get(placement.printAreaKey) ?? placement.printAreaKey,
-          objectCount: placement.objects.length,
-        }))
+        .map((placement) => {
+          const textCount = placement.objects.filter((o) => o.type === 'text').length;
+          return {
+            printAreaKey: placement.printAreaKey,
+            printAreaName: nameOf.get(placement.printAreaKey) ?? placement.printAreaKey,
+            objectCount: placement.objects.length,
+            imageCount: placement.objects.length - textCount,
+            textCount,
+          };
+        })
         .sort(this.byAreaOrder(template.printAreas, (s) => s.printAreaKey));
       worstQualityLevel = this.worstQualityLevelOf(document, template.printAreas, assetDims);
     }
@@ -420,6 +462,7 @@ export class DesignsService {
     for (const placement of document.placements) {
       const ppi = ppiByKey.get(placement.printAreaKey) ?? null;
       for (const object of placement.objects) {
+        if (object.type === 'text') continue; // vector-like, DPI does not apply
         const dims = assetDims.get(object.assetId);
         if (!dims) continue;
         const quality = evaluateObjectQuality(dims, object, ppi);
@@ -455,9 +498,7 @@ export class DesignsService {
    */
   private async toDto(design: DesignWithTemplate): Promise<DesignProjectDto> {
     const document = this.normalizedDocumentOf(design);
-    const assetDims = await this.assetDimsFor(
-      document.placements.flatMap((p) => p.objects.map((o) => o.assetId)),
-    );
+    const assetDims = await this.assetDimsFor(this.imageAssetIdsOf(document.placements));
     const qualityWarnings: ObjectQualityWarningDto[] = collectQualityWarnings(
       document.placements,
       design.productTemplate.printAreas,

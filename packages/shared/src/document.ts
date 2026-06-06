@@ -1,27 +1,52 @@
 import { BOUNDS_EPSILON, validateDesignObjects } from './geometry';
+import { designObjectContentErrors } from './text';
 import type {
   AnyDesignDocument,
   DesignDocument,
-  DesignPlacement,
+  DesignObject,
   Rect,
+  StoredDesignObject,
+  StoredDesignPlacement,
 } from './types';
 
 /**
- * Normalizes any stored design document to the current version (v2).
+ * Normalizes one stored object to the current discriminated-union shape.
+ * Objects saved before v1.5 carry no `type`; they are images by construction
+ * (assetId was the only kind that existed). Typed objects pass through.
+ */
+export function normalizeDesignObject(obj: StoredDesignObject): DesignObject {
+  if (obj.type === undefined) {
+    return { type: 'image', ...obj };
+  }
+  return obj;
+}
+
+/**
+ * Normalizes any stored design document to the current version (v2, typed objects).
  *
  * v1 documents ({ printAreaKey, objects }) become a single-placement v2 document.
- * v2 documents pass through unchanged. Anything else throws: an unknown version in
- * the database is data corruption, not user input, and must not be silently coerced.
+ * v2 documents pass through with their objects normalized (missing `type` -> image).
+ * Anything else throws: an unknown version in the database is data corruption, not
+ * user input, and must not be silently coerced.
  */
 export function normalizeDesignDocument(raw: AnyDesignDocument): DesignDocument {
   if (raw.version === 2) {
-    return raw;
+    return {
+      version: 2,
+      templateId: raw.templateId,
+      placements: raw.placements.map((p) => ({
+        printAreaKey: p.printAreaKey,
+        objects: p.objects.map(normalizeDesignObject),
+      })),
+    };
   }
   if (raw.version === 1) {
     return {
       version: 2,
       templateId: raw.templateId,
-      placements: [{ printAreaKey: raw.printAreaKey, objects: raw.objects }],
+      placements: [
+        { printAreaKey: raw.printAreaKey, objects: raw.objects.map(normalizeDesignObject) },
+      ],
     };
   }
   throw new Error(
@@ -54,13 +79,14 @@ export interface PlacementValidationResult {
  *
  * Placement-level rules: at least one placement, no duplicate keys, every key must
  * match an existing AND active area, every placement needs at least one object.
- * Object-level rules: delegated to validateDesignObjects (finite, positive size,
- * rotated corners inside the placement's own area).
+ * Object-level rules: geometry delegated to validateDesignObjects (finite, positive
+ * size, rotated corners inside the placement's own area); content delegated to
+ * designObjectContentErrors (image asset reference, text fields, kind purity).
  *
  * Pure function: the editor uses it for UX, the API uses it as the authority.
  */
 export function validateDesignPlacements(
-  placements: Pick<DesignPlacement, 'printAreaKey' | 'objects'>[],
+  placements: Pick<StoredDesignPlacement, 'printAreaKey' | 'objects'>[],
   printAreas: ValidatablePrintArea[],
   epsilon: number = BOUNDS_EPSILON,
 ): PlacementValidationResult {
@@ -109,6 +135,12 @@ export function validateDesignPlacements(
         message: objectError.message,
       });
     }
+
+    placement.objects.forEach((object, objectIndex) => {
+      for (const message of designObjectContentErrors(object)) {
+        errors.push({ placementIndex, objectIndex, message });
+      }
+    });
   });
 
   return { valid: errors.length === 0, errors };

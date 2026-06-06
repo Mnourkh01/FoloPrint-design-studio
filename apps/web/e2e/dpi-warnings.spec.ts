@@ -3,15 +3,6 @@ import { join } from 'node:path';
 
 const TINY_FIXTURE = join(__dirname, 'fixtures', 'tiny.png');
 
-declare global {
-  interface Window {
-    __studioCanvas?: {
-      backgroundImage?: unknown;
-      getObjects(): Array<Record<string, unknown>>;
-    };
-  }
-}
-
 /** Uploads the given file onto the active area and waits for the object to land. */
 const upload = async (page: Page, fixture: string): Promise<void> => {
   const before = await page.evaluate(

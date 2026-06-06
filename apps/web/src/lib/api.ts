@@ -93,6 +93,11 @@ export function assetFileUrl(assetId: string): string {
   return `/assets/${assetId}/file`;
 }
 
+/** Bundled whitelist font file URL (relative); same binary the server renders with. */
+export function fontFileUrl(fontKey: string): string {
+  return `/fonts/${encodeURIComponent(fontKey)}/file`;
+}
+
 export async function fetchDesign(id: string): Promise<DesignProjectDto> {
   return handle(await fetch(apiUrl(`/designs/${encodeURIComponent(id)}`), { cache: 'no-store' }));
 }

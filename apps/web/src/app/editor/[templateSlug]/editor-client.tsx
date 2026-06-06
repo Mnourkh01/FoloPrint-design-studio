@@ -2,9 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, Rect, type FabricObject } from 'fabric';
+import { Canvas, FabricImage, IText, Rect, type FabricObject } from 'fabric';
 import {
   evaluateObjectQuality,
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
+  FONT_WHITELIST,
+  fontDefinitionOf,
   printAreaPpi,
   validateDesignPlacements,
   type DesignObject,
@@ -13,11 +17,13 @@ import {
   type PrintAreaDto,
   type PrintQualityLevel,
   type ProductTemplateDto,
+  type TextAlign,
 } from '@foloprint/shared';
 import {
   ApiError,
   apiUrl,
   assetFileUrl,
+  fontFileUrl,
   renderDesign,
   saveDesign,
   updateDesign,
@@ -27,11 +33,52 @@ import {
 const STAGE_WIDTH = 620;
 
 /**
- * Every artwork object on the canvas is tagged with the print area it belongs to.
- * Inactive-area objects stay on the canvas but are hidden and non-interactive; they
- * are still serialized on save (one Fabric canvas, no per-area canvas churn).
+ * Loads every whitelist font from the API exactly once per page. The editor must
+ * measure text with the same font binaries the server renders with; until a font
+ * is loaded, Fabric would silently measure with a fallback font.
  */
-type DesignedObject = FabricObject & { assetId?: string; printAreaKey?: string };
+let fontsLoadedPromise: Promise<void> | null = null;
+function ensureEditorFonts(): Promise<void> {
+  if (!fontsLoadedPromise) {
+    fontsLoadedPromise = Promise.all(
+      FONT_WHITELIST.map(async (font) => {
+        if (document.fonts.check(`16px "${font.family}"`)) return;
+        const face = new FontFace(font.family, `url(${apiUrl(fontFileUrl(font.key))})`);
+        await face.load();
+        document.fonts.add(face);
+      }),
+    ).then(
+      () => undefined,
+      (error: unknown) => {
+        fontsLoadedPromise = null; // allow a retry on the next attempt
+        throw error;
+      },
+    );
+  }
+  return fontsLoadedPromise;
+}
+
+/** Defaults for a freshly added text object. */
+const TEXT_DEFAULTS = { fontKey: 'inter', fontSize: 48, color: '#1a1a1a', align: 'center' as TextAlign };
+
+/** Curated color swatches for the text panel; any #RRGGBB is valid, these are shortcuts. */
+const TEXT_SWATCHES = ['#1a1a1a', '#ffffff', '#cf3f22', '#1d4ed8', '#047857', '#b45309'];
+
+/**
+ * Every design object on the canvas is tagged with its kind and the print area it
+ * belongs to. Inactive-area objects stay on the canvas but are hidden and
+ * non-interactive; they are still serialized on save (one Fabric canvas, no
+ * per-area canvas churn). `fontKey` holds the whitelist key for text objects
+ * (Fabric's own fontFamily holds the CSS family name).
+ */
+type DesignedObject = FabricObject & {
+  kind?: 'image' | 'text';
+  assetId?: string;
+  printAreaKey?: string;
+  fontKey?: string;
+};
+
+type DesignedText = IText & DesignedObject;
 
 interface Status {
   tone: 'idle' | 'info' | 'error' | 'success';
@@ -40,13 +87,16 @@ interface Status {
 }
 
 interface SelectionReadout {
+  kind: 'image' | 'text';
   x: number;
   y: number;
   width: number;
   height: number;
   rotation: number;
-  /** Advisory print quality; null when the source pixel size is unknown. */
+  /** Advisory print quality; null for text objects (vector-like) and unknown sources. */
   quality: { effectiveDpi: number; level: PrintQualityLevel } | null;
+  /** Text styling, present when kind === 'text'. */
+  text: { fontKey: string; color: string; fontSize: number; align: TextAlign } | null;
 }
 
 /** One short phrase per quality level; advisory voice, never a hard stop. */
@@ -116,7 +166,7 @@ export function EditorClient({
   const designedObjects = useCallback((): DesignedObject[] => {
     const canvas = canvasRef.current;
     if (!canvas) return [];
-    return canvas.getObjects().filter((o): o is DesignedObject => Boolean((o as DesignedObject).assetId));
+    return canvas.getObjects().filter((o): o is DesignedObject => Boolean((o as DesignedObject).kind));
   }, []);
 
   const refreshAreaCounts = useCallback(() => {
@@ -196,20 +246,39 @@ export function EditorClient({
 
   const readSelection = useCallback(
     (obj: FabricObject | undefined | null) => {
-      if (!obj || !(obj as DesignedObject).assetId) {
+      const designed = obj as DesignedObject | undefined | null;
+      if (!designed?.kind) {
         setSelection(null);
         return;
       }
-      const quality = qualityOf(obj as DesignedObject);
+      // DPI is image-only: text is vector-like and rerenders sharp at any size.
+      const quality = designed.kind === 'image' ? qualityOf(designed) : null;
+      const text =
+        designed.kind === 'text'
+          ? {
+              fontKey: designed.fontKey ?? TEXT_DEFAULTS.fontKey,
+              color:
+                typeof (designed as DesignedText).fill === 'string'
+                  ? ((designed as DesignedText).fill as string)
+                  : TEXT_DEFAULTS.color,
+              fontSize: Math.round(
+                ((designed as DesignedText).fontSize ?? TEXT_DEFAULTS.fontSize) *
+                  (designed.scaleY ?? 1),
+              ),
+              align: ((designed as DesignedText).textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+            }
+          : null;
       setSelection({
-        x: Math.round(obj.left ?? 0),
-        y: Math.round(obj.top ?? 0),
-        width: Math.round(obj.getScaledWidth()),
-        height: Math.round(obj.getScaledHeight()),
-        rotation: Math.round(obj.angle ?? 0),
+        kind: designed.kind,
+        x: Math.round(designed.left ?? 0),
+        y: Math.round(designed.top ?? 0),
+        width: Math.round(designed.getScaledWidth()),
+        height: Math.round(designed.getScaledHeight()),
+        rotation: Math.round(designed.angle ?? 0),
         quality: quality
           ? { effectiveDpi: Math.round(quality.effectiveDpi), level: quality.level }
           : null,
+        text,
       });
     },
     [qualityOf],
@@ -218,7 +287,7 @@ export function EditorClient({
   const removeActiveObject = useCallback(() => {
     const canvas = canvasRef.current;
     const active = canvas?.getActiveObject() as DesignedObject | undefined;
-    if (canvas && active?.assetId) {
+    if (canvas && active?.kind) {
       canvas.remove(active);
       canvas.discardActiveObject();
       canvas.requestRenderAll();
@@ -227,6 +296,50 @@ export function EditorClient({
       refreshAreaCounts();
     }
   }, [refreshAreaCounts]);
+
+  /**
+   * Keeps the effective font size (fontSize * scale) inside the contract bounds so a
+   * corner-scaled text object can never serialize to a size the server would reject.
+   */
+  const clampTextScale = useCallback((obj: DesignedObject) => {
+    if (obj.kind !== 'text') return;
+    const t = obj as DesignedText;
+    const fontSize = t.fontSize ?? TEXT_DEFAULTS.fontSize;
+    const effective = fontSize * (t.scaleY ?? 1);
+    const clamped = Math.min(Math.max(effective, FONT_SIZE_MIN), FONT_SIZE_MAX);
+    if (clamped !== effective) {
+      const scale = clamped / fontSize;
+      t.set({ scaleX: scale, scaleY: scale });
+      t.setCoords();
+    }
+  }, []);
+
+  /** Builds a tagged IText with the editor's interaction rules (uniform scaling only). */
+  const makeDesignedText = useCallback(
+    (
+      content: string,
+      areaKey: string,
+      props: { fontKey: string; fontSize: number; color: string; align: TextAlign },
+    ): DesignedText => {
+      const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
+      const itext = new IText(content, {
+        fontFamily: definition.family,
+        fontSize: props.fontSize,
+        fill: props.color,
+        textAlign: props.align,
+        originX: 'center',
+        originY: 'center',
+      }) as DesignedText;
+      // Corner handles only: non-uniform stretching would decouple the visual size
+      // from fontSize and break the save-time bake (fontSize * scale).
+      itext.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
+      itext.kind = 'text';
+      itext.fontKey = definition.key;
+      itext.printAreaKey = areaKey;
+      return itext;
+    },
+    [],
+  );
 
   /** Loads a view image (base or overlay) into the per-area cache. */
   const loadViewImage = useCallback(
@@ -283,41 +396,86 @@ export function EditorClient({
     canvas.add(boundary);
     boundaryRef.current = boundary;
 
+    // Fonts load eagerly so Add Text and text reconstruction measure correctly.
+    // A failure here is surfaced when text is actually used, not on every page view.
+    void ensureEditorFonts().catch(() => undefined);
+
     // Re-open mode: place every saved object of every placement back exactly as persisted.
     if (initialDesign) {
+      const restoreImage = (saved: Extract<DesignObject, { type: 'image' }>, areaKey: string) =>
+        FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
+          .then((img) => {
+            if (disposed) return;
+            const naturalWidth = img.width ?? saved.width;
+            const naturalHeight = img.height ?? saved.height;
+            const mine = areaKey === activeAreaKeyRef.current;
+            img.set({
+              originX: 'center',
+              originY: 'center',
+              left: saved.x,
+              top: saved.y,
+              scaleX: saved.width / naturalWidth,
+              scaleY: saved.height / naturalHeight,
+              angle: saved.rotation,
+              visible: mine,
+              evented: mine,
+              selectable: mine,
+            });
+            const designed = img as DesignedObject;
+            designed.kind = 'image';
+            designed.assetId = saved.assetId;
+            designed.printAreaKey = areaKey;
+            canvas.add(img);
+            canvas.requestRenderAll();
+            refreshAreaCounts();
+          })
+          .catch(() => {
+            setStatus({
+              tone: 'error',
+              message: 'Some saved artwork could not be loaded; it may have been removed.',
+            });
+          });
+
+      // Text restores AFTER the fonts are ready: measuring with a fallback font would
+      // distort the scale-to-stored-box math below.
+      const restoreText = (saved: Extract<DesignObject, { type: 'text' }>, areaKey: string) =>
+        ensureEditorFonts()
+          .catch(() => undefined) // degraded measurement beats losing the object
+          .then(() => {
+            if (disposed) return;
+            const itext = makeDesignedText(saved.text, areaKey, {
+              fontKey: saved.fontFamily,
+              fontSize: saved.fontSize,
+              color: saved.color,
+              align: saved.align,
+            });
+            const mine = areaKey === activeAreaKeyRef.current;
+            itext.set({
+              left: saved.x,
+              top: saved.y,
+              angle: saved.rotation,
+              visible: mine,
+              evented: mine,
+              selectable: mine,
+            });
+            // Faithful geometry: scale the measured natural box to the stored box, so
+            // validation sees exactly the saved rectangle even if metrics drifted.
+            if (itext.width && itext.height) {
+              itext.set({ scaleX: saved.width / itext.width, scaleY: saved.height / itext.height });
+            }
+            itext.setCoords();
+            canvas.add(itext);
+            canvas.requestRenderAll();
+            refreshAreaCounts();
+          });
+
       for (const placement of initialDesign.design.placements) {
         for (const saved of placement.objects) {
-          FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
-            .then((img) => {
-              if (disposed) return;
-              const naturalWidth = img.width ?? saved.width;
-              const naturalHeight = img.height ?? saved.height;
-              const mine = placement.printAreaKey === activeAreaKeyRef.current;
-              img.set({
-                originX: 'center',
-                originY: 'center',
-                left: saved.x,
-                top: saved.y,
-                scaleX: saved.width / naturalWidth,
-                scaleY: saved.height / naturalHeight,
-                angle: saved.rotation,
-                visible: mine,
-                evented: mine,
-                selectable: mine,
-              });
-              const designed = img as DesignedObject;
-              designed.assetId = saved.assetId;
-              designed.printAreaKey = placement.printAreaKey;
-              canvas.add(img);
-              canvas.requestRenderAll();
-              refreshAreaCounts();
-            })
-            .catch(() => {
-              setStatus({
-                tone: 'error',
-                message: 'Some saved artwork could not be loaded; it may have been removed.',
-              });
-            });
+          if (saved.type === 'text') {
+            void restoreText(saved, placement.printAreaKey);
+          } else {
+            void restoreImage(saved, placement.printAreaKey);
+          }
         }
       }
     }
@@ -327,6 +485,7 @@ export function EditorClient({
     };
     const onModified = (e: { target?: FabricObject }) => {
       if (e.target) {
+        clampTextScale(e.target as DesignedObject);
         fitToPrintArea(e.target as DesignedObject);
         canvas.requestRenderAll();
         readSelection(e.target);
@@ -335,12 +494,24 @@ export function EditorClient({
     };
     const onSelection = () => readSelection(canvas.getActiveObject());
     const onCleared = () => setSelection(null);
+    // Inline editing can grow the text box past the print area; re-fit when it ends
+    // (per keystroke would fight the caret).
+    const onTextEditingExited = (e: { target?: FabricObject }) => {
+      if (e.target) {
+        clampTextScale(e.target as DesignedObject);
+        fitToPrintArea(e.target as DesignedObject);
+        canvas.requestRenderAll();
+        readSelection(e.target);
+      }
+      setDirty(true);
+    };
 
     canvas.on('object:moving', onMoving);
     canvas.on('object:modified', onModified);
     canvas.on('selection:created', onSelection);
     canvas.on('selection:updated', onSelection);
     canvas.on('selection:cleared', onCleared);
+    canvas.on('text:editing:exited', onTextEditingExited);
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Delete' && event.key !== 'Backspace') return;
@@ -368,7 +539,9 @@ export function EditorClient({
     zoom,
     stageHeight,
     clampToPrintArea,
+    clampTextScale,
     fitToPrintArea,
+    makeDesignedText,
     readSelection,
     removeActiveObject,
     refreshAreaCounts,
@@ -458,6 +631,7 @@ export function EditorClient({
         scaleX: scale,
         scaleY: scale,
       });
+      img.kind = 'image';
       img.assetId = asset.id;
       img.printAreaKey = area.key;
       canvas.add(img);
@@ -482,6 +656,50 @@ export function EditorClient({
     }
   };
 
+  /** Adds an editable text object centered in the active print area. */
+  const handleAddText = async () => {
+    const canvas = canvasRef.current;
+    const area = activeArea;
+    if (!canvas || !area) return;
+    try {
+      await ensureEditorFonts();
+    } catch {
+      setStatus({ tone: 'error', message: 'Fonts could not be loaded. Is the API running?' });
+      return;
+    }
+    const itext = makeDesignedText('Your text', area.key, TEXT_DEFAULTS);
+    itext.set({ left: area.x + area.width / 2, top: area.y + area.height / 2 });
+    itext.setCoords();
+    fitToPrintArea(itext);
+    canvas.add(itext);
+    canvas.setActiveObject(itext);
+    canvas.requestRenderAll();
+    readSelection(itext);
+    refreshAreaCounts();
+    setDirty(true);
+    setStatus({
+      tone: 'success',
+      message: `Text added to ${area.name}. Double-click it to edit the wording.`,
+    });
+  };
+
+  /** Applies a styling change to the selected text object and re-fits it. */
+  const updateActiveText = useCallback(
+    (mutate: (t: DesignedText) => void) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'text') return;
+      mutate(active as DesignedText);
+      active.setCoords();
+      clampTextScale(active);
+      fitToPrintArea(active);
+      canvas.requestRenderAll();
+      readSelection(active);
+      setDirty(true);
+    },
+    [clampTextScale, fitToPrintArea, readSelection],
+  );
+
   /**
    * Serializes ALL areas (visible and hidden) from the one canvas into v2 placements.
    * Normalized fields only; never raw Fabric JSON. Areas with no objects are omitted.
@@ -489,16 +707,41 @@ export function EditorClient({
   const collectPlacements = useCallback((): DesignPlacement[] => {
     const byArea = new Map<string, DesignObject[]>();
     for (const obj of designedObjects()) {
-      if (!obj.assetId || !obj.printAreaKey) continue;
+      if (!obj.printAreaKey) continue;
+
+      let serialized: DesignObject | null = null;
+      if (obj.kind === 'text') {
+        const t = obj as DesignedText;
+        serialized = {
+          type: 'text',
+          text: (t.text ?? '').replace(/\r\n?/g, '\n'),
+          fontFamily: t.fontKey ?? TEXT_DEFAULTS.fontKey,
+          // Uniform corner scaling bakes into the font size; the object never
+          // persists a scale factor.
+          fontSize: (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1),
+          color: typeof t.fill === 'string' ? t.fill : TEXT_DEFAULTS.color,
+          align: (t.textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+          x: t.left ?? 0,
+          y: t.top ?? 0,
+          width: t.getScaledWidth(),
+          height: t.getScaledHeight(),
+          rotation: (t.angle ?? 0) % 360,
+        };
+      } else if (obj.assetId) {
+        serialized = {
+          type: 'image',
+          assetId: obj.assetId,
+          x: obj.left ?? 0,
+          y: obj.top ?? 0,
+          width: obj.getScaledWidth(),
+          height: obj.getScaledHeight(),
+          rotation: (obj.angle ?? 0) % 360,
+        };
+      }
+      if (!serialized) continue;
+
       const list = byArea.get(obj.printAreaKey) ?? [];
-      list.push({
-        assetId: obj.assetId,
-        x: obj.left ?? 0,
-        y: obj.top ?? 0,
-        width: obj.getScaledWidth(),
-        height: obj.getScaledHeight(),
-        rotation: (obj.angle ?? 0) % 360,
-      });
+      list.push(serialized);
       byArea.set(obj.printAreaKey, list);
     }
     // Stable order: template area order, not canvas stacking order.
@@ -523,6 +766,7 @@ export function EditorClient({
       if (!obj.printAreaKey) continue;
       const n = (counters.get(obj.printAreaKey) ?? 0) + 1;
       counters.set(obj.printAreaKey, n);
+      if (obj.kind !== 'image') continue; // text is vector-like, DPI does not apply
       const quality = qualityOf(obj);
       if (quality?.level === 'poor') {
         notes.push(
@@ -536,7 +780,7 @@ export function EditorClient({
   const handleSave = async () => {
     const placements = collectPlacements();
     if (placements.length === 0) {
-      setStatus({ tone: 'error', message: 'Upload at least one artwork before saving.' });
+      setStatus({ tone: 'error', message: 'Add at least one artwork or text before saving.' });
       return;
     }
 
@@ -703,6 +947,15 @@ export function EditorClient({
           >
             {busy === 'upload' ? 'Uploading...' : 'Upload artwork'}
           </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            data-testid="add-text-button"
+            disabled={busy !== null}
+            onClick={() => void handleAddText()}
+          >
+            Add text
+          </button>
         </section>
 
         <section className="step">
@@ -733,6 +986,97 @@ export function EditorClient({
                   </span>
                 )}
               </div>
+              {selection.text && (
+                <div className="text-panel" data-testid="text-panel">
+                  <p className="text-panel__hint">Double-click the text on the canvas to edit the wording.</p>
+                  <label className="text-panel__field">
+                    Font
+                    <select
+                      data-testid="text-font-select"
+                      value={selection.text.fontKey}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        const family = fontDefinitionOf(key)?.family;
+                        if (!family) return;
+                        updateActiveText((t) => {
+                          t.fontKey = key;
+                          t.set({ fontFamily: family });
+                        });
+                      }}
+                    >
+                      {FONT_WHITELIST.map((font) => (
+                        <option key={font.key} value={font.key} style={{ fontFamily: font.family }}>
+                          {font.family}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="text-panel__field">
+                    Color
+                    <div className="text-panel__swatches">
+                      {TEXT_SWATCHES.map((swatch) => (
+                        <button
+                          key={swatch}
+                          type="button"
+                          className="text-panel__swatch"
+                          data-testid={`text-swatch-${swatch.slice(1)}`}
+                          style={{ background: swatch }}
+                          aria-label={`Text color ${swatch}`}
+                          onClick={() => updateActiveText((t) => t.set({ fill: swatch }))}
+                        />
+                      ))}
+                      <input
+                        type="color"
+                        data-testid="text-color-input"
+                        value={selection.text.color}
+                        onChange={(e) => {
+                          const color = e.target.value; // native input always emits #rrggbb
+                          updateActiveText((t) => t.set({ fill: color }));
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <label className="text-panel__field">
+                    Size
+                    <input
+                      type="number"
+                      data-testid="text-size-input"
+                      min={FONT_SIZE_MIN}
+                      max={FONT_SIZE_MAX}
+                      value={selection.text.fontSize}
+                      onChange={(e) => {
+                        const size = Number(e.target.value);
+                        if (!Number.isFinite(size)) return;
+                        const clamped = Math.min(Math.max(size, FONT_SIZE_MIN), FONT_SIZE_MAX);
+                        updateActiveText((t) => {
+                          // Reset any interactive scale so the typed size IS the size.
+                          t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
+                        });
+                      }}
+                    />
+                  </label>
+                  <div className="text-panel__field" role="group" aria-label="Text alignment">
+                    Align
+                    <div className="text-panel__align">
+                      {(['left', 'center', 'right'] as const).map((align) => (
+                        <button
+                          key={align}
+                          type="button"
+                          data-testid={`text-align-${align}`}
+                          className={
+                            selection.text?.align === align
+                              ? 'btn btn--ghost btn--small btn--active'
+                              : 'btn btn--ghost btn--small'
+                          }
+                          onClick={() => updateActiveText((t) => t.set({ textAlign: align }))}
+                        >
+                          {align}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
               <button
                 type="button"
                 className="btn btn--ghost btn--small"

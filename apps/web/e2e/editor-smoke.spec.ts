@@ -22,17 +22,6 @@ interface ObjectState {
   zoom: number;
 }
 
-declare global {
-  interface Window {
-    __studioCanvas?: {
-      backgroundImage?: unknown;
-      getZoom(): number;
-      getObjects(): Array<Record<string, unknown>>;
-      getActiveObject(): Record<string, unknown> | undefined;
-    };
-  }
-}
-
 /** State of the (single) design object belonging to the given print area. */
 const getObjectState = (page: Page, areaKey: AreaKey): Promise<ObjectState> =>
   page.evaluate((key) => {

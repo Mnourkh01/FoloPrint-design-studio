@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Put,
   StreamableFile,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
@@ -15,6 +16,9 @@ import type { DesignProjectDto, RenderResultDto } from '@foloprint/shared';
 import { DesignsService } from './designs.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateDesignDto } from './dto/create-design.dto';
+
+/** Env-overridable so the e2e suite can exceed the human-scale default. */
+const RENDER_THROTTLE_LIMIT = Number(process.env.RENDER_THROTTLE_LIMIT ?? 10);
 
 @Controller('designs')
 export class DesignsController {
@@ -33,9 +37,17 @@ export class DesignsController {
     return this.designs.findById(id);
   }
 
+  @Put(':id')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateDesignDto,
+  ): Promise<DesignProjectDto> {
+    return this.designs.update(id, dto);
+  }
+
   @Post(':id/render')
   @HttpCode(201)
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: RENDER_THROTTLE_LIMIT, ttl: 60_000 } })
   render(@Param('id', ParseUUIDPipe) id: string): Promise<RenderResultDto> {
     return this.designs.render(id);
   }

@@ -126,3 +126,68 @@ test('editor flow: open, upload, move, resize, save, render, preview', async ({ 
   const naturalWidth = await preview.evaluate((el) => (el as HTMLImageElement).naturalWidth);
   expect(naturalWidth).toBeGreaterThan(0);
 });
+
+test('edit flow: re-open saved design, change it, update, re-render', async ({ page }) => {
+  // --- Create and render a design first (independent of the other test) ---
+  await page.goto('/editor/classic-tee');
+  await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
+  await page.setInputFiles('[data-testid=upload-input]', FIXTURE);
+  await page.waitForFunction(() =>
+    window.__studioCanvas?.getObjects().some((o) => (o as { assetId?: string }).assetId),
+  );
+  await page.getByTestId('save-design').click();
+  await expect(page.getByTestId('editor-status')).toContainText('Design saved');
+  await page.getByTestId('generate-mockup').click();
+  await page.waitForURL(/\/designs\/[0-9a-f-]{36}/);
+  await expect(page.getByTestId('preview-image')).toBeVisible();
+
+  const designId = page.url().match(/\/designs\/([0-9a-f-]{36})/)?.[1];
+  expect(designId).toBeTruthy();
+
+  // --- Re-open it from the preview page ---
+  await page.getByTestId('edit-design').click();
+  await page.waitForURL(new RegExp(`/editor/classic-tee\\?design=${designId}`));
+
+  // Saved object loads back onto the canvas; editing badge shows.
+  await page.waitForFunction(() =>
+    window.__studioCanvas?.getObjects().some((o) => (o as { assetId?: string }).assetId),
+  );
+  await expect(page.getByTestId('editing-badge')).toContainText('Editing saved design');
+
+  const loaded = await getObjectState(page);
+  expectInsidePrintArea(loaded);
+
+  // Mockup button enabled (design is saved and clean), Save disabled until something changes.
+  await expect(page.getByTestId('generate-mockup')).toBeEnabled();
+  await expect(page.getByTestId('save-design')).toBeDisabled();
+
+  // --- Move the artwork ---
+  const stageBox = await page.getByTestId('editor-stage').boundingBox();
+  if (!stageBox) throw new Error('editor stage not visible');
+  const zoom = loaded.zoom;
+  const cx = stageBox.x + loaded.left * zoom;
+  const cy = stageBox.y + loaded.top * zoom;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx - 25, cy - 30, { steps: 10 });
+  await page.mouse.up();
+
+  const afterMove = await getObjectState(page);
+  expect(afterMove.left).not.toBeCloseTo(loaded.left, 0);
+  expectInsidePrintArea(afterMove);
+
+  // Dirty state: mockup blocked until the change is saved.
+  await expect(page.getByTestId('generate-mockup')).toBeDisabled();
+
+  // --- Save the update (same design, no duplicate) ---
+  await page.getByTestId('save-design').click();
+  await expect(page.getByTestId('editor-status')).toContainText('Design updated');
+
+  // --- Re-render and land on the same design's preview ---
+  await page.getByTestId('generate-mockup').click();
+  await page.waitForURL(new RegExp(`/designs/${designId}`));
+  const preview = page.getByTestId('preview-image');
+  await expect(preview).toBeVisible();
+  const naturalWidth = await preview.evaluate((el) => (el as HTMLImageElement).naturalWidth);
+  expect(naturalWidth).toBeGreaterThan(0);
+});

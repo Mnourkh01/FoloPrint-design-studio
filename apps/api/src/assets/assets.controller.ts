@@ -17,6 +17,8 @@ import { AssetsService } from './assets.service';
 import { StorageService } from '../storage/storage.service';
 
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES ?? 10 * 1024 * 1024);
+/** Env-overridable so the e2e suite can exceed the human-scale default. */
+const UPLOAD_THROTTLE_LIMIT = Number(process.env.UPLOAD_THROTTLE_LIMIT ?? 12);
 
 @Controller('assets')
 export class AssetsController {
@@ -26,7 +28,7 @@ export class AssetsController {
   ) {}
 
   @Post('upload')
-  @Throttle({ default: { limit: 12, ttl: 60_000 } })
+  @Throttle({ default: { limit: UPLOAD_THROTTLE_LIMIT, ttl: 60_000 } })
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),

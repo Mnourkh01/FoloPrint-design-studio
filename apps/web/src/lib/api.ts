@@ -77,6 +77,22 @@ export async function saveDesign(payload: SaveDesignPayload): Promise<DesignProj
   );
 }
 
+/** Replaces the design document of an existing design; the server clears the stale preview. */
+export async function updateDesign(id: string, payload: SaveDesignPayload): Promise<DesignProjectDto> {
+  return handle(
+    await fetch(apiUrl(`/designs/${encodeURIComponent(id)}`), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
+/** Stable asset file URL (relative); the API never exposes storage paths. */
+export function assetFileUrl(assetId: string): string {
+  return `/assets/${assetId}/file`;
+}
+
 export async function fetchDesign(id: string): Promise<DesignProjectDto> {
   return handle(await fetch(apiUrl(`/designs/${encodeURIComponent(id)}`), { cache: 'no-store' }));
 }

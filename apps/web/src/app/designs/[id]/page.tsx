@@ -33,7 +33,8 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           />
         ) : (
           <div className="preview-frame__empty" data-testid="preview-empty">
-            Not rendered yet. Generate the mockup to see it here.
+            No current preview. The design changed since the last render, or it was never
+            rendered. Generate the mockup to refresh it.
           </div>
         )}
       </div>
@@ -57,7 +58,16 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           <dd>{new Date(design.createdAt).toLocaleString()}</dd>
         </dl>
 
-        <RenderButton designId={design.id} hasPreview={Boolean(design.previewUrl)} />
+        <div className="action-row">
+          <RenderButton designId={design.id} hasPreview={Boolean(design.previewUrl)} />
+          <Link
+            href={`/editor/${design.templateSlug}?design=${design.id}`}
+            className="btn btn--ghost btn--auto"
+            data-testid="edit-design"
+          >
+            Edit design
+          </Link>
+        </div>
         <p style={{ marginTop: 16 }}>
           <Link href={`/editor/${design.templateSlug}`} className="template-card__cta">
             Start a new design on this template

@@ -255,6 +255,140 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('PUT /designs/:id', () => {
+    const createDesign = async (assetId: string) => {
+      const area = template.printAreas[0]!;
+      const res = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          printAreaKey: area.key,
+          objects: [
+            {
+              assetId,
+              x: area.x + area.width / 2,
+              y: area.y + area.height / 2,
+              width: 120,
+              height: 120,
+              rotation: 0,
+            },
+          ],
+        })
+        .expect(201);
+      return res.body as { id: string };
+    };
+
+    it('updates a design and clears the stale preview', async () => {
+      const asset = await uploadPng();
+      const area = template.printAreas[0]!;
+      const design = await createDesign(asset.id);
+
+      // Render so a preview exists, then prove the update invalidates it.
+      await http().post(`/designs/${design.id}/render`).expect(201);
+      await http().get(`/designs/${design.id}/preview`).expect(200);
+
+      const updated = await http()
+        .put(`/designs/${design.id}`)
+        .send({
+          templateId: template.id,
+          printAreaKey: area.key,
+          objects: [
+            {
+              assetId: asset.id,
+              x: area.x + 80,
+              y: area.y + 90,
+              width: 100,
+              height: 100,
+              rotation: 10,
+            },
+          ],
+        })
+        .expect(200);
+
+      expect(updated.body.id).toBe(design.id); // same design, no duplicate
+      expect(updated.body.previewUrl).toBeNull();
+      expect(updated.body.design.objects[0].x).toBe(area.x + 80);
+
+      const refreshed = await http().get(`/designs/${design.id}`).expect(200);
+      expect(refreshed.body.previewUrl).toBeNull();
+      await http().get(`/designs/${design.id}/preview`).expect(404);
+    });
+
+    it('rejects an update with a mismatched template id', async () => {
+      const asset = await uploadPng();
+      const design = await createDesign(asset.id);
+      const area = template.printAreas[0]!;
+      const res = await http()
+        .put(`/designs/${design.id}`)
+        .send({
+          templateId: '00000000-0000-4000-8000-000000000000',
+          printAreaKey: area.key,
+          objects: [{ assetId: asset.id, x: area.x + 80, y: area.y + 80, width: 80, height: 80, rotation: 0 }],
+        })
+        .expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/different template/);
+    });
+
+    it('rejects an update with an object outside the print area', async () => {
+      const asset = await uploadPng();
+      const design = await createDesign(asset.id);
+      const area = template.printAreas[0]!;
+      await http()
+        .put(`/designs/${design.id}`)
+        .send({
+          templateId: template.id,
+          printAreaKey: area.key,
+          objects: [
+            {
+              assetId: asset.id,
+              x: area.x + area.width + 300,
+              y: area.y + 50,
+              width: 100,
+              height: 100,
+              rotation: 0,
+            },
+          ],
+        })
+        .expect(400);
+    });
+
+    it('rejects an update referencing an unknown asset', async () => {
+      const asset = await uploadPng();
+      const design = await createDesign(asset.id);
+      const area = template.printAreas[0]!;
+      await http()
+        .put(`/designs/${design.id}`)
+        .send({
+          templateId: template.id,
+          printAreaKey: area.key,
+          objects: [
+            {
+              assetId: '00000000-0000-4000-8000-000000000000',
+              x: area.x + 80,
+              y: area.y + 80,
+              width: 80,
+              height: 80,
+              rotation: 0,
+            },
+          ],
+        })
+        .expect(400);
+    });
+
+    it('404s when updating an unknown design', async () => {
+      const asset = await uploadPng();
+      const area = template.printAreas[0]!;
+      await http()
+        .put('/designs/00000000-0000-4000-8000-000000000000')
+        .send({
+          templateId: template.id,
+          printAreaKey: area.key,
+          objects: [{ assetId: asset.id, x: area.x + 80, y: area.y + 80, width: 80, height: 80, rotation: 0 }],
+        })
+        .expect(404);
+    });
+  });
+
   describe('render flow', () => {
     it('renders a saved design to a PNG preview', async () => {
       const asset = await uploadPng();

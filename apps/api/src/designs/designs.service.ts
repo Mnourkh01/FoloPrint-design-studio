@@ -33,6 +33,52 @@ export class DesignsService {
    * the print area (rotated corners checked). Client clamping is UX only.
    */
   async create(dto: CreateDesignDto): Promise<DesignProjectDto> {
+    const designJson = await this.validateAndBuildDocument(dto);
+
+    const design = await this.prisma.designProject.create({
+      data: {
+        productTemplateId: designJson.templateId,
+        designJson: designJson as unknown as Prisma.InputJsonValue,
+      },
+      include: { productTemplate: { include: { printAreas: true } } },
+    });
+
+    return this.toDto(design);
+  }
+
+  /**
+   * Replaces the design document of an existing design (PUT semantics).
+   * The template is immutable for a design; the stale preview is cleared because it no
+   * longer matches the document.
+   */
+  async update(id: string, dto: CreateDesignDto): Promise<DesignProjectDto> {
+    const existing = await this.findEntity(id);
+    if (dto.templateId !== existing.productTemplateId) {
+      throw new BadRequestException(
+        'Design belongs to a different template; templateId cannot change on update',
+      );
+    }
+
+    const designJson = await this.validateAndBuildDocument(dto);
+
+    if (existing.previewPath) {
+      await this.storage.remove(existing.previewPath);
+    }
+
+    const updated = await this.prisma.designProject.update({
+      where: { id },
+      data: {
+        designJson: designJson as unknown as Prisma.InputJsonValue,
+        previewPath: null,
+      },
+      include: { productTemplate: { include: { printAreas: true } } },
+    });
+
+    return this.toDto(updated);
+  }
+
+  /** Full validation chain shared by create and update. Returns the normalized document. */
+  private async validateAndBuildDocument(dto: CreateDesignDto): Promise<DesignDocument> {
     const template = await this.prisma.productTemplate.findFirst({
       where: { id: dto.templateId, active: true },
       include: { printAreas: { where: { active: true } } },
@@ -58,7 +104,7 @@ export class DesignsService {
       });
     }
 
-    const designJson: DesignDocument = {
+    return {
       version: 1,
       templateId: template.id,
       printAreaKey: dto.printAreaKey,
@@ -71,16 +117,6 @@ export class DesignsService {
         rotation: o.rotation,
       })),
     };
-
-    const design = await this.prisma.designProject.create({
-      data: {
-        productTemplateId: template.id,
-        designJson: designJson as unknown as Prisma.InputJsonValue,
-      },
-      include: { productTemplate: { include: { printAreas: true } } },
-    });
-
-    return this.toDto(design);
   }
 
   async findById(id: string): Promise<DesignProjectDto> {

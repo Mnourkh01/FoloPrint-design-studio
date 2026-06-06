@@ -49,7 +49,8 @@ npm run dev:web            # Next.js on http://localhost:3000  (second terminal)
 ```
 
 Open http://localhost:3000, open the sample tee, upload a PNG/JPEG logo, position it, Save Design,
-Generate Mockup.
+Generate Mockup. From a design's preview page, "Edit design" re-opens it in the editor
+(`/editor/:slug?design=:id`); saving there updates the same design and clears the stale preview.
 
 ## Tests
 
@@ -75,6 +76,7 @@ First Playwright run may need `npx playwright install chromium`.
 | GET | `/assets/:id/file` | uploaded asset (streamed) |
 | POST | `/designs` | save design JSON (server-side geometry validation) |
 | GET | `/designs/:id` | design + preview URL |
+| PUT | `/designs/:id` | replace design JSON (same validation; clears the stale preview) |
 | POST | `/designs/:id/render` | compose mockup PNG with sharp |
 | GET | `/designs/:id/preview` | rendered mockup (streamed) |
 

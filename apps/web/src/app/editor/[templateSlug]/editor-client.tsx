@@ -6,9 +6,18 @@ import { Canvas, FabricImage, Rect, type FabricObject } from 'fabric';
 import {
   validateDesignObjects,
   type DesignObject,
+  type DesignProjectDto,
   type ProductTemplateDto,
 } from '@foloprint/shared';
-import { ApiError, apiUrl, renderDesign, saveDesign, uploadAsset } from '@/lib/api';
+import {
+  ApiError,
+  apiUrl,
+  assetFileUrl,
+  renderDesign,
+  saveDesign,
+  updateDesign,
+  uploadAsset,
+} from '@/lib/api';
 
 const STAGE_WIDTH = 620;
 
@@ -28,7 +37,13 @@ interface SelectionReadout {
   rotation: number;
 }
 
-export function EditorClient({ template }: { template: ProductTemplateDto }) {
+export function EditorClient({
+  template,
+  initialDesign,
+}: {
+  template: ProductTemplateDto;
+  initialDesign?: DesignProjectDto;
+}) {
   const router = useRouter();
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
   const canvasRef = useRef<Canvas | null>(null);
@@ -38,13 +53,17 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
   const zoom = STAGE_WIDTH / template.canvasWidth;
   const stageHeight = Math.round(template.canvasHeight * zoom);
 
-  const [status, setStatus] = useState<Status>({
-    tone: 'idle',
-    message: 'Upload artwork to get started.',
-  });
+  const [status, setStatus] = useState<Status>(
+    initialDesign
+      ? { tone: 'info', message: 'Editing saved design. Save your changes, then re-render the mockup.' }
+      : { tone: 'idle', message: 'Upload artwork to get started.' },
+  );
   const [objectCount, setObjectCount] = useState(0);
   const [selection, setSelection] = useState<SelectionReadout | null>(null);
-  const [savedDesignId, setSavedDesignId] = useState<string | null>(null);
+  /** The persisted design being edited; null until the first successful save. */
+  const [designId, setDesignId] = useState<string | null>(initialDesign?.id ?? null);
+  /** True when the canvas differs from what the server has for designId. */
+  const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'upload' | 'save' | 'render' | null>(null);
 
   const designedObjects = useCallback((): DesignedObject[] => {
@@ -106,6 +125,19 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
       height: Math.round(obj.getScaledHeight()),
       rotation: Math.round(obj.angle ?? 0),
     });
+  }, []);
+
+  const removeActiveObject = useCallback(() => {
+    const canvas = canvasRef.current;
+    const active = canvas?.getActiveObject() as DesignedObject | undefined;
+    if (canvas && active?.assetId) {
+      canvas.remove(active);
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+      setSelection(null);
+      setDirty(true);
+      setObjectCount((c) => Math.max(0, c - 1));
+    }
   }, []);
 
   useEffect(() => {
@@ -176,6 +208,37 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
     });
     canvas.add(boundary);
 
+    // Re-open mode: place every saved object back exactly as persisted.
+    if (initialDesign) {
+      for (const saved of initialDesign.design.objects) {
+        FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
+          .then((img) => {
+            if (disposed) return;
+            const naturalWidth = img.width ?? saved.width;
+            const naturalHeight = img.height ?? saved.height;
+            img.set({
+              originX: 'center',
+              originY: 'center',
+              left: saved.x,
+              top: saved.y,
+              scaleX: saved.width / naturalWidth,
+              scaleY: saved.height / naturalHeight,
+              angle: saved.rotation,
+            });
+            (img as DesignedObject).assetId = saved.assetId;
+            canvas.add(img);
+            canvas.requestRenderAll();
+            setObjectCount((c) => c + 1);
+          })
+          .catch(() => {
+            setStatus({
+              tone: 'error',
+              message: 'Some saved artwork could not be loaded; it may have been removed.',
+            });
+          });
+      }
+    }
+
     const onMoving = (e: { target?: FabricObject }) => {
       if (e.target) clampToPrintArea(e.target);
     };
@@ -185,7 +248,7 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
         canvas.requestRenderAll();
         readSelection(e.target);
       }
-      setSavedDesignId(null); // edits invalidate the previous save
+      setDirty(true); // edits make the saved design (and its preview) stale
     };
     const onSelection = () => readSelection(canvas.getActiveObject());
     const onCleared = () => setSelection(null);
@@ -200,15 +263,7 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
       if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       const target = event.target as HTMLElement | null;
       if (target && ['INPUT', 'TEXTAREA'].includes(target.tagName)) return;
-      const active = canvas.getActiveObject() as DesignedObject | undefined;
-      if (active?.assetId) {
-        canvas.remove(active);
-        canvas.discardActiveObject();
-        canvas.requestRenderAll();
-        setSelection(null);
-        setSavedDesignId(null);
-        setObjectCount((c) => Math.max(0, c - 1));
-      }
+      removeActiveObject();
     };
     window.addEventListener('keydown', onKeyDown);
 
@@ -218,7 +273,17 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
       void canvas.dispose();
       canvasRef.current = null;
     };
-  }, [template, printArea, zoom, stageHeight, clampToPrintArea, fitToPrintArea, readSelection]);
+  }, [
+    template,
+    initialDesign,
+    printArea,
+    zoom,
+    stageHeight,
+    clampToPrintArea,
+    fitToPrintArea,
+    readSelection,
+    removeActiveObject,
+  ]);
 
   const handleUpload = async (file: File) => {
     const canvas = canvasRef.current;
@@ -251,7 +316,7 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
       canvas.requestRenderAll();
       readSelection(img);
       setObjectCount((c) => c + 1);
-      setSavedDesignId(null);
+      setDirty(true);
       setStatus({
         tone: 'success',
         message: `${asset.originalFilename} added. Drag, resize, and rotate it inside the print area.`,
@@ -298,15 +363,22 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
     }
 
     setBusy('save');
-    setStatus({ tone: 'info', message: 'Saving design...' });
+    setStatus({ tone: 'info', message: designId ? 'Updating design...' : 'Saving design...' });
     try {
-      const design = await saveDesign({
-        templateId: template.id,
-        printAreaKey: printArea.key,
-        objects,
-      });
-      setSavedDesignId(design.id);
-      setStatus({ tone: 'success', message: 'Design saved. Generate the mockup when ready.' });
+      const payload = { templateId: template.id, printAreaKey: printArea.key, objects };
+      if (designId) {
+        await updateDesign(designId, payload);
+        setDirty(false);
+        setStatus({
+          tone: 'success',
+          message: 'Design updated. The old preview is stale; render the mockup again.',
+        });
+      } else {
+        const design = await saveDesign(payload);
+        setDesignId(design.id);
+        setDirty(false);
+        setStatus({ tone: 'success', message: 'Design saved. Generate the mockup when ready.' });
+      }
     } catch (error) {
       setStatus({
         tone: 'error',
@@ -319,11 +391,11 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
   };
 
   const handleRender = async () => {
-    if (!savedDesignId) return;
+    if (!designId || dirty) return;
     setBusy('render');
     setStatus({ tone: 'info', message: 'Rendering mockup on the server...' });
     try {
-      const result = await renderDesign(savedDesignId);
+      const result = await renderDesign(designId);
       router.push(`/designs/${result.id}`);
     } catch (error) {
       setBusy(null);
@@ -350,6 +422,14 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
     );
   }
 
+  const saveLabel = busy === 'save'
+    ? 'Saving...'
+    : designId
+      ? dirty
+        ? 'Save changes'
+        : 'Saved'
+      : 'Save design';
+
   return (
     <div className="editor-grid">
       <div className="stage">
@@ -367,6 +447,13 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
       </div>
 
       <aside className="rail">
+        {designId && (
+          <div className="badge" data-testid="editing-badge">
+            Editing saved design · {designId.slice(0, 8)}
+            {dirty ? ' · unsaved changes' : ''}
+          </div>
+        )}
+
         <section className="step">
           <div className="step__head">
             <span className="step__num">01</span>
@@ -417,18 +504,7 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
                 type="button"
                 className="btn btn--ghost btn--small"
                 data-testid="delete-object"
-                onClick={() => {
-                  const canvas = canvasRef.current;
-                  const active = canvas?.getActiveObject() as DesignedObject | undefined;
-                  if (canvas && active?.assetId) {
-                    canvas.remove(active);
-                    canvas.discardActiveObject();
-                    canvas.requestRenderAll();
-                    setSelection(null);
-                    setSavedDesignId(null);
-                    setObjectCount((c) => Math.max(0, c - 1));
-                  }
-                }}
+                onClick={removeActiveObject}
               >
                 Remove selected
               </button>
@@ -448,10 +524,10 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
             type="button"
             className="btn"
             data-testid="save-design"
-            disabled={busy !== null || objectCount === 0}
+            disabled={busy !== null || objectCount === 0 || (designId !== null && !dirty)}
             onClick={() => void handleSave()}
           >
-            {busy === 'save' ? 'Saving...' : savedDesignId ? 'Saved' : 'Save design'}
+            {saveLabel}
           </button>
         </section>
 
@@ -460,12 +536,16 @@ export function EditorClient({ template }: { template: ProductTemplateDto }) {
             <span className="step__num">04</span>
             <span className="step__title">Mockup</span>
           </div>
-          <p>Server-side render with sharp: base, your artwork, fabric overlay.</p>
+          <p>
+            {dirty && designId
+              ? 'Unsaved changes. Save first, then render the fresh preview.'
+              : 'Server-side render with sharp: base, your artwork, fabric overlay.'}
+          </p>
           <button
             type="button"
             className="btn btn--accent"
             data-testid="generate-mockup"
-            disabled={busy !== null || !savedDesignId}
+            disabled={busy !== null || !designId || dirty}
             onClick={() => void handleRender()}
           >
             {busy === 'render' ? 'Rendering...' : 'Generate mockup'}

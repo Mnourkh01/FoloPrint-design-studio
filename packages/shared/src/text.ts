@@ -1,5 +1,12 @@
 import { isFontFamilyKey } from './fonts';
-import type { StoredDesignObject, TextAlign, TextDirection, TextWrapMode } from './types';
+import type {
+  StoredDesignObject,
+  TextAlign,
+  TextDirection,
+  TextOutline,
+  TextShadow,
+  TextWrapMode,
+} from './types';
 
 /**
  * Content rules for design objects (non-geometry). Pure functions: the editor
@@ -18,6 +25,11 @@ export const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 export const TEXT_ALIGNMENTS: readonly TextAlign[] = ['left', 'center', 'right'];
 export const TEXT_DIRECTIONS: readonly TextDirection[] = ['ltr', 'rtl', 'auto'];
 export const TEXT_WRAP_MODES: readonly TextWrapMode[] = ['none', 'box'];
+/** Outline stroke width bounds, canvas px (v1.8). */
+export const OUTLINE_WIDTH_MIN = 1;
+export const OUTLINE_WIDTH_MAX = 20;
+/** Max absolute shadow offset per axis, canvas px (v1.8). */
+export const SHADOW_OFFSET_MAX = 25;
 
 /**
  * Control characters are rejected except `\n` (explicit line breaks).
@@ -100,7 +112,9 @@ function imageObjectContentErrors(
     carried.fontSize !== undefined ||
     carried.direction !== undefined ||
     carried.wrapMode !== undefined ||
-    carried.wrappedLines !== undefined
+    carried.wrappedLines !== undefined ||
+    carried.outline !== undefined ||
+    carried.shadow !== undefined
   ) {
     errors.push('Image object must not carry text fields');
   }
@@ -161,7 +175,49 @@ function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text'
   }
 
   errors.push(...wrappedLinesErrors(obj, wrapMode));
+  errors.push(...outlineErrors(obj.outline));
+  errors.push(...shadowErrors(obj.shadow));
 
+  return errors;
+}
+
+/** v1.8 outline rules: well-formed object, hex color, bounded width. */
+function outlineErrors(outline: TextOutline | undefined): string[] {
+  if (outline === undefined) return [];
+  if (typeof outline !== 'object' || outline === null) {
+    return ['Outline must be an object with color and width'];
+  }
+  const errors: string[] = [];
+  if (typeof outline.color !== 'string' || !HEX_COLOR_PATTERN.test(outline.color)) {
+    errors.push('Outline color must be a #RRGGBB hex value');
+  }
+  if (
+    !isFiniteNumber(outline.width) ||
+    outline.width < OUTLINE_WIDTH_MIN ||
+    outline.width > OUTLINE_WIDTH_MAX
+  ) {
+    errors.push(`Outline width must be between ${OUTLINE_WIDTH_MIN} and ${OUTLINE_WIDTH_MAX}`);
+  }
+  return errors;
+}
+
+/** v1.8 shadow rules: hex color, bounded offsets, not invisibly zero. */
+function shadowErrors(shadow: TextShadow | undefined): string[] {
+  if (shadow === undefined) return [];
+  if (typeof shadow !== 'object' || shadow === null) {
+    return ['Shadow must be an object with color, offsetX, and offsetY'];
+  }
+  const errors: string[] = [];
+  if (typeof shadow.color !== 'string' || !HEX_COLOR_PATTERN.test(shadow.color)) {
+    errors.push('Shadow color must be a #RRGGBB hex value');
+  }
+  const validOffset = (v: unknown): v is number =>
+    isFiniteNumber(v) && Math.abs(v) <= SHADOW_OFFSET_MAX;
+  if (!validOffset(shadow.offsetX) || !validOffset(shadow.offsetY)) {
+    errors.push(`Shadow offsets must be between -${SHADOW_OFFSET_MAX} and ${SHADOW_OFFSET_MAX}`);
+  } else if (shadow.offsetX === 0 && shadow.offsetY === 0) {
+    errors.push('Shadow offset must not be zero in both axes');
+  }
   return errors;
 }
 

@@ -41,6 +41,26 @@ export interface ImageDesignObject extends DesignObjectBase {
 
 export type TextAlign = 'left' | 'center' | 'right';
 
+/** Outline (stroke) around text glyphs; the editor paints it stroke-first (half outward). */
+export interface TextOutline {
+  /** Strict #RRGGBB. */
+  color: string;
+  /** Stroke width in canvas px (1..20); the measured text box includes it. */
+  width: number;
+}
+
+/**
+ * Hard drop shadow behind text glyphs (no blur). Offsets in canvas px, each
+ * clamped to +-25. Shadow pixels may extend past the stored text box by design;
+ * geometry validation stays on the glyph box.
+ */
+export interface TextShadow {
+  /** Strict #RRGGBB. */
+  color: string;
+  offsetX: number;
+  offsetY: number;
+}
+
 /** Base text direction. 'auto' = first strong character decides (resolveTextDirection). */
 export type TextDirection = 'ltr' | 'rtl' | 'auto';
 
@@ -80,6 +100,10 @@ export interface TextDesignObject extends DesignObjectBase {
    * edited, only regenerated on save.
    */
   wrappedLines?: string[];
+  /** Glyph outline (v1.8); absent = none. */
+  outline?: TextOutline;
+  /** Hard drop shadow (v1.8); absent = none. */
+  shadow?: TextShadow;
 }
 
 /**

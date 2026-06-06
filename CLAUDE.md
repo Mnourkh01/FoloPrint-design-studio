@@ -60,6 +60,13 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   zero-width LRM/RLM marks per line, never stored; stored text rejects all bidi control
   characters. Pango flips left/right align for RTL, so the renderer swaps them to keep
   `align` visual.
+- Text effects (v1.8): optional `outline` ({color, width 1..20}) and `shadow`
+  ({color, offsetX/offsetY within +-25, never both zero}). Editor = Fabric stroke
+  (paintFirst 'stroke'; the measured box includes it) + Shadow (blur 0; never in the
+  box). Server: outline ring-composited at width/2 BEFORE the fit-to-box, shadow
+  composited AFTER the fit at exact canvas px; shadow pixels may extend past the
+  stored box (bounded by the offset clamp) while geometry validation stays on the
+  glyph box.
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

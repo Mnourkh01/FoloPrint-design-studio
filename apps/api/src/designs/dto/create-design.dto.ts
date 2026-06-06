@@ -21,6 +21,9 @@ import {
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   HEX_COLOR_PATTERN,
+  OUTLINE_WIDTH_MAX,
+  OUTLINE_WIDTH_MIN,
+  SHADOW_OFFSET_MAX,
   TEXT_ALIGNMENTS,
   TEXT_DIRECTIONS,
   TEXT_MAX_LENGTH,
@@ -30,6 +33,33 @@ import {
   type TextDirection,
   type TextWrapMode,
 } from '@foloprint/shared';
+
+/** v1.8 glyph outline. Both fields required when the object is present. */
+export class TextOutlineDto {
+  @Matches(HEX_COLOR_PATTERN, { message: 'outline color must be a #RRGGBB hex value' })
+  color!: string;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(OUTLINE_WIDTH_MIN)
+  @Max(OUTLINE_WIDTH_MAX)
+  width!: number;
+}
+
+/** v1.8 hard drop shadow. All fields required when the object is present. */
+export class TextShadowDto {
+  @Matches(HEX_COLOR_PATTERN, { message: 'shadow color must be a #RRGGBB hex value' })
+  color!: string;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-SHADOW_OFFSET_MAX)
+  @Max(SHADOW_OFFSET_MAX)
+  offsetX!: number;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-SHADOW_OFFSET_MAX)
+  @Max(SHADOW_OFFSET_MAX)
+  offsetY!: number;
+}
 
 const isText = (o: DesignObjectDto): boolean => o.type === 'text';
 
@@ -128,6 +158,20 @@ export class DesignObjectDto {
   @IsString({ each: true })
   @Length(1, TEXT_MAX_LENGTH, { each: true })
   wrappedLines?: string[];
+
+  /** Glyph outline (v1.8); missing means none. Text objects only. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TextOutlineDto)
+  outline?: TextOutlineDto;
+
+  /** Hard drop shadow (v1.8); missing means none. Text objects only. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TextShadowDto)
+  shadow?: TextShadowDto;
 }
 
 /** All artwork for one print area. Placements with zero objects are rejected. */

@@ -251,6 +251,89 @@ describe('renderMockup with text objects', () => {
   });
 });
 
+describe('renderMockup text outline and shadow (v1.8)', () => {
+  /** Counts pixels in a region matching a channel predicate. */
+  async function countPixels(
+    png: Buffer,
+    region: { left: number; top: number; width: number; height: number },
+    match: (r: number, g: number, b: number) => boolean,
+  ): Promise<number> {
+    const { data, info } = await sharp(png).extract(region).raw().toBuffer({ resolveWithObject: true });
+    let count = 0;
+    for (let i = 0; i < data.length; i += info.channels) {
+      if (match(data[i]!, data[i + 1]!, data[i + 2]!)) count++;
+    }
+    return count;
+  }
+
+  it('draws a green outline ring around red glyphs inside the stored box', async () => {
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ outline: { color: '#00cc00', width: 6 } })],
+    });
+
+    const box = { left: 120, top: 170, width: 160, height: 60 };
+    const red = await countPixels(buffer, box, (r, g) => r > 150 && g < 100);
+    const green = await countPixels(buffer, box, (r, g, b) => g > 120 && r < 100 && b < 100);
+    expect(red).toBeGreaterThan(30); // fill survives
+    expect(green).toBeGreaterThan(30); // ring exists around it
+
+    // Outline stays inside the stroke-inclusive stored box.
+    const above = await countPixels(buffer, { left: 110, top: 155, width: 180, height: 10 }, (r, g) => g > 120 && r < 100);
+    expect(above).toBe(0);
+  });
+
+  it('draws a hard blue shadow at the stored offset under the glyphs', async () => {
+    const plain = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject()],
+    });
+    const shadowed = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ shadow: { color: '#0000cc', offsetX: 8, offsetY: 8 } })],
+    });
+
+    const wide = { left: 110, top: 160, width: 190, height: 90 };
+    const isBlue = (r: number, g: number, b: number) => b > 120 && r < 100 && g < 100;
+    expect(await countPixels(plain, wide, isBlue)).toBe(0);
+    expect(await countPixels(shadowed, wide, isBlue)).toBeGreaterThan(30);
+
+    // The fill stays red on top of the shadow.
+    const red = await countPixels(shadowed, wide, (r, g) => r > 150 && g < 100);
+    expect(red).toBeGreaterThan(30);
+  });
+
+  it('rejects invalid outline and shadow values', async () => {
+    const base = {
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+    };
+    await expect(
+      renderMockup({ ...base, objects: [textObject({ outline: { color: 'green', width: 6 } })] }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({ ...base, objects: [textObject({ outline: { color: '#00cc00', width: 99 } })] }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({
+        ...base,
+        objects: [textObject({ shadow: { color: '#0000cc', offsetX: 99, offsetY: 0 } })],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});
+
 describe('renderMockup RTL/Arabic (v1.6)', () => {
   it('shapes Arabic: joined word materially narrower than isolated letters (spike S1)', async () => {
     const joined = await arabicRasterWidth('مرحبا بالعالم');

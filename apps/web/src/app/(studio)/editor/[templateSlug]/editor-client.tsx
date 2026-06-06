@@ -3,15 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Rect, Textbox, type FabricObject } from 'fabric';
+import { Canvas, FabricImage, IText, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
   evaluateObjectQuality,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   FONT_WHITELIST,
   fontDefinitionOf,
+  OUTLINE_WIDTH_MAX,
+  OUTLINE_WIDTH_MIN,
   printAreaPpi,
   resolveTextDirection,
+  SHADOW_OFFSET_MAX,
   TEXT_MAX_LINES,
   validateDesignPlacements,
   type DesignObject,
@@ -23,6 +26,8 @@ import {
   type ProductTemplateDto,
   type TextAlign,
   type TextDirection,
+  type TextOutline,
+  type TextShadow,
 } from '@foloprint/shared';
 import {
   ApiError,
@@ -307,6 +312,10 @@ interface SelectionReadout {
     wrap: boolean;
     /** Current visual line count (soft wraps included for Textbox). */
     lineCount: number;
+    /** v1.8 glyph outline; null = off. */
+    outline: TextOutline | null;
+    /** v1.8 hard drop shadow; null = off. */
+    shadow: TextShadow | null;
   } | null;
 }
 
@@ -506,6 +515,20 @@ export function EditorClient({
               resolvedDirection: resolveTextDirection(t.text ?? '', designed.textDirection ?? 'auto'),
               wrap: t instanceof Textbox,
               lineCount: visualLineCountOf(t),
+              // Effects live in Fabric's own props: stroke pair for the outline,
+              // the Shadow object for the shadow. No extra tags to drift.
+              outline:
+                typeof t.stroke === 'string' && (t.strokeWidth ?? 0) > 0
+                  ? { color: t.stroke, width: t.strokeWidth ?? 0 }
+                  : null,
+              shadow:
+                t.shadow && typeof t.shadow === 'object'
+                  ? {
+                      color: typeof t.shadow.color === 'string' ? t.shadow.color : '#000000',
+                      offsetX: t.shadow.offsetX ?? 0,
+                      offsetY: t.shadow.offsetY ?? 0,
+                    }
+                  : null,
             }
           : null;
       setSelection({
@@ -573,6 +596,10 @@ export function EditorClient({
         wrap?: boolean;
         /** Wrap box width; Textbox only. */
         width?: number;
+        /** v1.8 glyph outline; the stroke joins the measured box on purpose. */
+        outline?: TextOutline;
+        /** v1.8 hard drop shadow; never part of the measured box. */
+        shadow?: TextShadow;
       },
     ): DesignedText => {
       const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
@@ -585,11 +612,29 @@ export function EditorClient({
         originX: 'center' as const,
         originY: 'center' as const,
         direction: resolveTextDirection(content, direction),
-        // Fabric's default strokeWidth (1) inflates getScaledWidth() by 1px even with
-        // no stroke. For a Textbox that 1px becomes a wider wrap box on every
-        // save/reopen cycle and can flip a boundary-tight line break. Text never
-        // strokes here, so measure exactly.
-        strokeWidth: 0,
+        // Without an outline, strokeWidth is 0: Fabric's default (1) inflates
+        // getScaledWidth() by 1px even with no stroke, which can flip a
+        // boundary-tight Textbox line break across save/reopen cycles. With an
+        // outline the stroke joins the measurement on purpose (the server fits
+        // the ring-composited raster to the same stroke-inclusive box).
+        ...(props.outline
+          ? {
+              stroke: props.outline.color,
+              strokeWidth: props.outline.width,
+              paintFirst: 'stroke' as const,
+              strokeLineJoin: 'round' as const,
+            }
+          : { strokeWidth: 0 }),
+        ...(props.shadow
+          ? {
+              shadow: new Shadow({
+                color: props.shadow.color,
+                offsetX: props.shadow.offsetX,
+                offsetY: props.shadow.offsetY,
+                blur: 0,
+              }),
+            }
+          : {}),
       };
       const itext = (
         props.wrap
@@ -728,6 +773,8 @@ export function EditorClient({
               // The stored width IS the wrap box width; the Textbox re-wraps live
               // with its own engine and regenerates wrappedLines on the next save.
               width: isBox ? saved.width : undefined,
+              outline: saved.outline,
+              shadow: saved.shadow,
             });
             const mine = areaKey === activeAreaKeyRef.current;
             itext.set({
@@ -1177,6 +1224,19 @@ export function EditorClient({
         direction: t.textDirection ?? 'auto',
         wrap,
         width: wrap ? t.getScaledWidth() : undefined,
+        // Carry the v1.8 effects across the IText <-> Textbox swap.
+        outline:
+          typeof t.stroke === 'string' && (t.strokeWidth ?? 0) > 0
+            ? { color: t.stroke, width: t.strokeWidth ?? 1 }
+            : undefined,
+        shadow:
+          t.shadow && typeof t.shadow === 'object'
+            ? {
+                color: typeof t.shadow.color === 'string' ? t.shadow.color : '#000000',
+                offsetX: t.shadow.offsetX ?? 0,
+                offsetY: t.shadow.offsetY ?? 0,
+              }
+            : undefined,
       });
       replacement.set({ left: t.left, top: t.top, angle: t.angle });
       canvas.remove(t);
@@ -1205,6 +1265,33 @@ export function EditorClient({
       if (obj.kind === 'text') {
         const t = obj as DesignedText;
         const isBox = t instanceof Textbox;
+        const scale = t.scaleY ?? 1;
+        // Effects bake the interactive scale like fontSize does, then clamp to the
+        // contract bounds so a corner-scaled object can never serialize out of range.
+        const outline =
+          typeof t.stroke === 'string' && (t.strokeWidth ?? 0) > 0
+            ? {
+                color: t.stroke,
+                width: Math.min(
+                  Math.max((t.strokeWidth ?? 1) * scale, OUTLINE_WIDTH_MIN),
+                  OUTLINE_WIDTH_MAX,
+                ),
+              }
+            : undefined;
+        const clampOffset = (v: number) =>
+          Math.min(Math.max(v * scale, -SHADOW_OFFSET_MAX), SHADOW_OFFSET_MAX);
+        const shadowOffsetX = clampOffset(t.shadow?.offsetX ?? 0);
+        const shadowOffsetY = clampOffset(t.shadow?.offsetY ?? 0);
+        // A both-zero offset is an invisible shadow; the contract rejects it, so
+        // it simply serializes as "no shadow".
+        const shadow =
+          t.shadow && typeof t.shadow === 'object' && (shadowOffsetX !== 0 || shadowOffsetY !== 0)
+            ? {
+                color: typeof t.shadow.color === 'string' ? t.shadow.color : '#000000',
+                offsetX: shadowOffsetX,
+                offsetY: shadowOffsetY,
+              }
+            : undefined;
         serialized = {
           type: 'text',
           text: (t.text ?? '').replace(/\r\n?/g, '\n'),
@@ -1221,6 +1308,8 @@ export function EditorClient({
           // flattened); the server renders these verbatim and verifies they
           // reconcile with the raw text. Regenerated on every save, never edited.
           ...(isBox ? { wrappedLines: [...t.textLines] } : {}),
+          ...(outline ? { outline } : {}),
+          ...(shadow ? { shadow } : {}),
           x: t.left ?? 0,
           y: t.top ?? 0,
           width: t.getScaledWidth(),
@@ -1564,6 +1653,108 @@ export function EditorClient({
             </span>
             <small>Side handles set the box width; text reflows inside it.</small>
           </label>
+          <div className="text-panel__field text-panel__effect" data-testid="text-outline-section">
+            <label>
+              <input
+                type="checkbox"
+                data-testid="text-outline-toggle"
+                checked={Boolean(selection.text.outline)}
+                onChange={(e) =>
+                  updateActiveText((t) =>
+                    e.target.checked
+                      ? t.set({
+                          stroke: '#ffffff',
+                          strokeWidth: 4,
+                          paintFirst: 'stroke',
+                          strokeLineJoin: 'round',
+                        })
+                      : t.set({ stroke: undefined, strokeWidth: 0 }),
+                  )
+                }
+              />{' '}
+              Outline
+            </label>
+            {selection.text.outline && (
+              <div className="text-panel__effect-row">
+                <input
+                  type="color"
+                  data-testid="text-outline-color"
+                  value={selection.text.outline.color}
+                  onChange={(e) => {
+                    const color = e.target.value;
+                    updateActiveText((t) => t.set({ stroke: color }));
+                  }}
+                />
+                <input
+                  type="number"
+                  data-testid="text-outline-width"
+                  min={OUTLINE_WIDTH_MIN}
+                  max={OUTLINE_WIDTH_MAX}
+                  value={Math.round(selection.text.outline.width)}
+                  aria-label="Outline width"
+                  onChange={(e) => {
+                    const width = Number(e.target.value);
+                    if (!Number.isFinite(width)) return;
+                    const clamped = Math.min(Math.max(width, OUTLINE_WIDTH_MIN), OUTLINE_WIDTH_MAX);
+                    updateActiveText((t) => t.set({ strokeWidth: clamped }));
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          <div className="text-panel__field text-panel__effect" data-testid="text-shadow-section">
+            <label>
+              <input
+                type="checkbox"
+                data-testid="text-shadow-toggle"
+                checked={Boolean(selection.text.shadow)}
+                onChange={(e) =>
+                  updateActiveText((t) => {
+                    t.shadow = e.target.checked
+                      ? new Shadow({ color: '#000000', offsetX: 4, offsetY: 4, blur: 0 })
+                      : null;
+                  })
+                }
+              />{' '}
+              Shadow
+            </label>
+            {selection.text.shadow && (
+              <div className="text-panel__effect-row">
+                <input
+                  type="color"
+                  data-testid="text-shadow-color"
+                  value={selection.text.shadow.color}
+                  onChange={(e) => {
+                    const color = e.target.value;
+                    updateActiveText((t) => {
+                      if (t.shadow) t.shadow.color = color;
+                    });
+                  }}
+                />
+                {(['offsetX', 'offsetY'] as const).map((axis) => (
+                  <input
+                    key={axis}
+                    type="number"
+                    data-testid={`text-shadow-${axis === 'offsetX' ? 'x' : 'y'}`}
+                    min={-SHADOW_OFFSET_MAX}
+                    max={SHADOW_OFFSET_MAX}
+                    // Non-null: this row only renders inside the shadow guard above;
+                    // TS just cannot see through the map callback.
+                    value={Math.round(selection.text!.shadow![axis])}
+                    aria-label={`Shadow ${axis}`}
+                    onChange={(e) => {
+                      const value = Number(e.target.value);
+                      if (!Number.isFinite(value)) return;
+                      const clamped = Math.min(Math.max(value, -SHADOW_OFFSET_MAX), SHADOW_OFFSET_MAX);
+                      updateActiveText((t) => {
+                        if (t.shadow) t.shadow[axis] = clamped;
+                      });
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
           {selection.text.lineCount > TEXT_MAX_LINES && (
             <p
               className="text-panel__warning"

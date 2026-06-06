@@ -948,6 +948,75 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('text outline and shadow (v1.8)', () => {
+    const textIn = (a: PrintAreaDto, overrides: Partial<Record<string, unknown>> = {}) => ({
+      type: 'text',
+      text: 'Effects',
+      fontFamily: 'inter',
+      fontSize: 48,
+      color: '#cc0033',
+      align: 'center',
+      x: a.x + a.width / 2,
+      y: a.y + a.height / 2,
+      width: 180,
+      height: 60,
+      rotation: 0,
+      ...overrides,
+    });
+
+    const postFront = (objects: object[]) =>
+      http()
+        .post('/designs')
+        .send({ templateId: template.id, placements: [{ printAreaKey: 'front', objects }] });
+
+    it('saves, renders, and reopens text with an outline and a shadow', async () => {
+      const res = await postFront([
+        textIn(area('front'), {
+          outline: { color: '#ffffff', width: 4 },
+          shadow: { color: '#000000', offsetX: 6, offsetY: -6 },
+        }),
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({
+        outline: { color: '#ffffff', width: 4 },
+        shadow: { color: '#000000', offsetX: 6, offsetY: -6 },
+      });
+
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      await http().get(`/designs/${dto.id}/preview/front`).expect(200);
+
+      const reopened = await http().get(`/designs/${dto.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        outline: { color: '#ffffff', width: 4 },
+        shadow: { color: '#000000', offsetX: 6, offsetY: -6 },
+      });
+    });
+
+    it('rejects out-of-range outline widths and shadow offsets (DTO level)', async () => {
+      await postFront([textIn(area('front'), { outline: { color: '#ffffff', width: 0 } })]).expect(400);
+      await postFront([textIn(area('front'), { outline: { color: '#ffffff', width: 21 } })]).expect(400);
+      await postFront([
+        textIn(area('front'), { shadow: { color: '#000000', offsetX: 26, offsetY: 0 } }),
+      ]).expect(400);
+    });
+
+    it('rejects bad effect colors and a both-zero shadow offset', async () => {
+      await postFront([textIn(area('front'), { outline: { color: 'white', width: 4 } })]).expect(400);
+      const res = await postFront([
+        textIn(area('front'), { shadow: { color: '#000000', offsetX: 0, offsetY: 0 } }),
+      ]).expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/not be zero/i);
+    });
+
+    it('rejects effects on image objects (kind purity)', async () => {
+      const asset = await uploadPng();
+      const res = await postFront([
+        { ...objectIn(area('front'), asset.id), shadow: { color: '#000000', offsetX: 4, offsetY: 4 } },
+      ]).expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/must not carry text fields/i);
+    });
+  });
+
   describe('GET /fonts/:key/file', () => {
     it('streams a whitelisted font as TTF', async () => {
       const res = await http()

@@ -170,6 +170,64 @@ test('text objects: add, style, move, resize, save, render, reopen', async ({ pa
   );
 });
 
+test('text effects: outline and shadow set in the panel survive save, render, reopen', async ({ page }) => {
+  await page.goto('/editor/classic-tee');
+  await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
+
+  await page.getByTestId('tool-text').click();
+  await page.getByTestId('add-text-button').click();
+  await page.waitForFunction(
+    () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),
+  );
+
+  // Enable both effects and adjust them through the panel controls.
+  await page.getByTestId('text-outline-toggle').check();
+  await page.getByTestId('text-outline-width').fill('6');
+  await page.getByTestId('text-shadow-toggle').check();
+  await page.getByTestId('text-shadow-x').fill('8');
+
+  const effectsState = () =>
+    page.evaluate(() => {
+      const obj = (window.__studioCanvas?.getObjects() ?? []).find(
+        (o) => (o as { kind?: string }).kind === 'text',
+      ) as
+        | {
+            stroke?: unknown;
+            strokeWidth?: number;
+            shadow?: { color?: string; offsetX?: number; offsetY?: number } | null;
+          }
+        | undefined;
+      if (!obj) throw new Error('no text object on canvas');
+      return {
+        stroke: obj.stroke,
+        strokeWidth: obj.strokeWidth,
+        shadow: obj.shadow ? { x: obj.shadow.offsetX, y: obj.shadow.offsetY } : null,
+      };
+    });
+
+  const before = await effectsState();
+  expect(before.stroke).toBe('#ffffff');
+  expect(before.strokeWidth).toBe(6);
+  expect(before.shadow).toEqual({ x: 8, y: 4 });
+
+  // Save, render, reopen: the effects round-trip through the stored document.
+  await page.getByTestId('save-design').click();
+  await expect(page.getByTestId('editor-status')).toContainText('Design saved');
+  await page.getByTestId('generate-mockup').click();
+  await page.waitForURL(/\/designs\/[0-9a-f-]{36}/);
+  await page.getByTestId('edit-design').click();
+  await page.waitForURL(/\/editor\/classic-tee\?design=/);
+  await page.waitForFunction(
+    () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),
+  );
+
+  const after = await effectsState();
+  expect(after.stroke).toBe('#ffffff');
+  expect(after.strokeWidth).toBeCloseTo(6, 0);
+  expect(after.shadow?.x).toBeCloseTo(8, 0);
+  expect(after.shadow?.y).toBeCloseTo(4, 0);
+});
+
 test('mixed design: image and text on the same area save and render together', async ({ page }) => {
   await page.goto('/editor/classic-tee');
   await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));

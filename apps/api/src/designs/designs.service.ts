@@ -209,6 +209,13 @@ export class DesignsService {
         ...(o.direction !== undefined ? { direction: o.direction } : {}),
         ...(o.wrapMode !== undefined ? { wrapMode: o.wrapMode } : {}),
         ...(o.wrappedLines !== undefined ? { wrappedLines: o.wrappedLines } : {}),
+        // v1.8 effects: explicit field picking, same as everything else here.
+        ...(o.outline !== undefined
+          ? { outline: { color: o.outline.color, width: o.outline.width } }
+          : {}),
+        ...(o.shadow !== undefined
+          ? { shadow: { color: o.shadow.color, offsetX: o.shadow.offsetX, offsetY: o.shadow.offsetY } }
+          : {}),
         ...base,
       };
     }
@@ -274,6 +281,8 @@ export class DesignsService {
             color: obj.color,
             align: obj.align,
             direction: resolveTextDirection(obj.text, obj.direction),
+            ...(obj.outline ? { outline: obj.outline } : {}),
+            ...(obj.shadow ? { shadow: obj.shadow } : {}),
             ...base,
           };
         }

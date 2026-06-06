@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Canvas, FabricImage, IText, Rect, Textbox, type FabricObject } from 'fabric';
 import {
@@ -33,7 +34,73 @@ import {
   uploadAsset,
 } from '@/lib/api';
 
-const STAGE_WIDTH = 620;
+const STAGE_WIDTH = 680;
+
+/** View zoom (multiplier over the fit zoom) bounds for the stage zoom widget. */
+const VIEW_ZOOM_MIN = 0.5;
+const VIEW_ZOOM_MAX = 2;
+const VIEW_ZOOM_STEP = 1.25;
+
+/** Left tool rail entries; the contextual panel renders per active tool. */
+type StudioTool = 'product' | 'uploads' | 'text' | 'saved' | 'layers';
+
+/** Hand-drawn 24px stroke icons; no icon dependency for five glyphs. */
+const TOOL_ICONS: Record<StudioTool, React.ReactNode> = {
+  product: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" aria-hidden>
+      <path d="M16 3.5l4.5 2.5-1.7 4.3-1.8-.8V21H7V9.5l-1.8.8L3.5 6 8 3.5a4 4.2 0 0 0 8 0z" />
+    </svg>
+  ),
+  uploads: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 16V4m0 0L8 8m4-4l4 4" />
+      <path d="M4 20h16" />
+    </svg>
+  ),
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+      <path d="M5 6V4h14v2M12 4v16m-3 0h6" />
+    </svg>
+  ),
+  saved: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <path d="M6.5 3.5h11V21L12 16.8 6.5 21z" />
+    </svg>
+  ),
+  layers: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <path d="M12 3.5l8.5 4.7L12 12.9 3.5 8.2z" />
+      <path d="M3.5 13l8.5 4.7L20.5 13" />
+    </svg>
+  ),
+};
+
+const TOOL_LABELS: Record<StudioTool, string> = {
+  product: 'Product',
+  uploads: 'Uploads',
+  text: 'Text',
+  saved: 'Saved',
+  layers: 'Layers',
+};
+
+const TOOL_ORDER: StudioTool[] = ['product', 'uploads', 'text', 'saved', 'layers'];
+
+/**
+ * Polished selection chrome shared by every design object: branded border,
+ * round white grab handles. Pure cosmetics; geometry math is untouched.
+ */
+function applySelectionStyle(obj: FabricObject): void {
+  obj.set({
+    borderColor: '#cf3f22',
+    borderScaleFactor: 1.6,
+    cornerColor: '#ffffff',
+    cornerStrokeColor: '#cf3f22',
+    cornerStyle: 'circle',
+    cornerSize: 9,
+    touchCornerSize: 18,
+    transparentCorners: false,
+  });
+}
 
 /**
  * Loads every whitelist font from the API exactly once per page. The editor must
@@ -175,6 +242,15 @@ export function EditorClient({
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'upload' | 'save' | 'render' | null>(null);
 
+  /** Active tool in the left rail; selecting a canvas object follows its kind. */
+  const [tool, setTool] = useState<StudioTool>('uploads');
+  /** Mirrors tool for canvas event handlers registered once at init. */
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
+
+  /** View zoom multiplier over the fit zoom (1 = product fits the stage). */
+  const [viewZoom, setViewZoom] = useState(1);
+
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
     [template.printAreas, activeAreaKey],
@@ -273,6 +349,12 @@ export function EditorClient({
       if (!designed?.kind) {
         setSelection(null);
         return;
+      }
+      // The contextual panel follows the selected object's kind, except while the
+      // user is browsing the layers list (selecting from there must not yank the
+      // panel away).
+      if (toolRef.current !== 'layers') {
+        setTool(designed.kind === 'text' ? 'text' : 'uploads');
       }
       // DPI is image-only: text is vector-like and rerenders sharp at any size.
       const quality = designed.kind === 'image' ? qualityOf(designed) : null;
@@ -389,6 +471,7 @@ export function EditorClient({
         // from fontSize and break the save-time bake (fontSize * scale).
         itext.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
       }
+      applySelectionStyle(itext);
       itext.kind = 'text';
       itext.fontKey = definition.key;
       itext.printAreaKey = areaKey;
@@ -478,6 +561,7 @@ export function EditorClient({
               evented: mine,
               selectable: mine,
             });
+            applySelectionStyle(img);
             const designed = img as DesignedObject;
             designed.kind = 'image';
             designed.assetId = saved.assetId;
@@ -625,6 +709,19 @@ export function EditorClient({
     refreshAreaCounts,
   ]);
 
+  // ---- view zoom: scale the viewport around the stage center ----
+  // At viewZoom 1 the transform is exactly [fit, 0, 0, fit, 0, 0] (the v1 behavior);
+  // zooming never touches object geometry, only the viewport.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvasReady || !canvas) return;
+    const z = zoom * viewZoom;
+    const offsetX = (STAGE_WIDTH - template.canvasWidth * z) / 2;
+    const offsetY = (stageHeight - template.canvasHeight * z) / 2;
+    canvas.setViewportTransform([z, 0, 0, z, offsetX, offsetY]);
+    canvas.requestRenderAll();
+  }, [canvasReady, viewZoom, zoom, stageHeight, template.canvasWidth, template.canvasHeight]);
+
   // ---- area switch: swap view images + boundary, toggle object visibility ----
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -709,6 +806,7 @@ export function EditorClient({
         scaleX: scale,
         scaleY: scale,
       });
+      applySelectionStyle(img);
       img.kind = 'image';
       img.assetId = asset.id;
       img.printAreaKey = area.key;
@@ -1009,17 +1107,34 @@ export function EditorClient({
     return 'status';
   }, [status.tone]);
 
+  /** Selects a layer row's object on the canvas (fires Fabric's selection events). */
+  const selectLayer = useCallback(
+    (obj: DesignedObject) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      canvas.setActiveObject(obj);
+      canvas.requestRenderAll();
+      readSelection(obj);
+    },
+    [readSelection],
+  );
+
   if (template.printAreas.length === 0) {
     return (
-      <div className="notice">
-        <strong>This template has no active print area.</strong>
-        <p>Seed data is incomplete; re-run the seed.</p>
+      <div className="studio-notice">
+        <div className="notice">
+          <strong>This template has no active print area.</strong>
+          <p>Seed data is incomplete; re-run the seed.</p>
+        </div>
       </div>
     );
   }
 
   const totalObjects = Object.values(areaCounts).reduce((sum, n) => sum + n, 0);
   const placedAreas = Object.keys(areaCounts).length;
+  const zoomPercent = Math.round(zoom * viewZoom * 100);
+  const layerObjects = designedObjects().filter((o) => o.printAreaKey === activeAreaKey);
+  const activeCanvasObject = canvasRef.current?.getActiveObject() ?? null;
 
   const saveLabel = busy === 'save'
     ? 'Saving...'
@@ -1029,10 +1144,487 @@ export function EditorClient({
         : 'Saved'
       : 'Save design';
 
+  /* Selection details shown under the uploads/text/layers panels. Rendered once
+     (only the active tool's panel mounts it), so the testids stay unique. */
+  const selectionSection = selection ? (
+    <div className="studio__panel-section">
+      <p className="studio__panel-title">Selected {selection.kind}</p>
+      <div className="readout" data-testid="selection-readout">
+        <span>
+          center <b>{selection.x}, {selection.y}</b>
+        </span>
+        <span>
+          size <b>{selection.width} x {selection.height}</b>
+        </span>
+        <span>
+          angle <b>{selection.rotation}deg</b>
+        </span>
+        {selection.quality && (
+          <span
+            className={`readout__quality readout__quality--${selection.quality.level}`}
+            data-testid="dpi-readout"
+            data-level={selection.quality.level}
+          >
+            print <b>~{selection.quality.effectiveDpi} DPI</b>,{' '}
+            {QUALITY_COPY[selection.quality.level]}
+          </span>
+        )}
+      </div>
+      {selection.text && (
+        <div className="text-panel" data-testid="text-panel">
+          <p className="text-panel__hint">Double-click the text on the canvas to edit the wording.</p>
+          <label className="text-panel__field">
+            Font
+            <select
+              data-testid="text-font-select"
+              value={selection.text.fontKey}
+              onChange={(e) => {
+                const key = e.target.value;
+                const family = fontDefinitionOf(key)?.family;
+                if (!family) return;
+                updateActiveText((t) => {
+                  t.fontKey = key;
+                  t.set({ fontFamily: family });
+                });
+              }}
+            >
+              {FONT_WHITELIST.map((font) => (
+                <option key={font.key} value={font.key} style={{ fontFamily: font.family }}>
+                  {font.family}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="text-panel__field">
+            Color
+            <div className="text-panel__swatches">
+              {TEXT_SWATCHES.map((swatch) => (
+                <button
+                  key={swatch}
+                  type="button"
+                  className="text-panel__swatch"
+                  data-testid={`text-swatch-${swatch.slice(1)}`}
+                  style={{ background: swatch }}
+                  aria-label={`Text color ${swatch}`}
+                  onClick={() => updateActiveText((t) => t.set({ fill: swatch }))}
+                />
+              ))}
+              <input
+                type="color"
+                data-testid="text-color-input"
+                value={selection.text.color}
+                onChange={(e) => {
+                  const color = e.target.value; // native input always emits #rrggbb
+                  updateActiveText((t) => t.set({ fill: color }));
+                }}
+              />
+            </div>
+          </div>
+          <label className="text-panel__field">
+            Size
+            <input
+              type="number"
+              data-testid="text-size-input"
+              min={FONT_SIZE_MIN}
+              max={FONT_SIZE_MAX}
+              value={selection.text.fontSize}
+              onChange={(e) => {
+                const size = Number(e.target.value);
+                if (!Number.isFinite(size)) return;
+                const clamped = Math.min(Math.max(size, FONT_SIZE_MIN), FONT_SIZE_MAX);
+                updateActiveText((t) => {
+                  // Reset any interactive scale so the typed size IS the size.
+                  t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
+                });
+              }}
+            />
+          </label>
+          <div className="text-panel__field" role="group" aria-label="Text alignment">
+            Align
+            <div className="text-panel__align">
+              {(['left', 'center', 'right'] as const).map((align) => (
+                <button
+                  key={align}
+                  type="button"
+                  data-testid={`text-align-${align}`}
+                  className={
+                    selection.text?.align === align
+                      ? 'btn btn--ghost btn--small btn--active'
+                      : 'btn btn--ghost btn--small'
+                  }
+                  onClick={() => updateActiveText((t) => t.set({ textAlign: align }))}
+                >
+                  {align}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="text-panel__field" role="group" aria-label="Text direction">
+            Direction
+            <div className="text-panel__align">
+              {(['auto', 'ltr', 'rtl'] as const).map((dir) => (
+                <button
+                  key={dir}
+                  type="button"
+                  data-testid={`text-direction-${dir}`}
+                  data-resolved={
+                    dir === 'auto' ? selection.text?.resolvedDirection : undefined
+                  }
+                  className={
+                    selection.text?.direction === dir
+                      ? 'btn btn--ghost btn--small btn--active'
+                      : 'btn btn--ghost btn--small'
+                  }
+                  onClick={() => setTextDirection(dir)}
+                >
+                  {dir === 'auto' ? `auto (${selection.text?.resolvedDirection})` : dir}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label className="text-panel__field text-panel__wrap">
+            <span>
+              <input
+                type="checkbox"
+                data-testid="text-wrap-toggle"
+                checked={selection.text.wrap}
+                onChange={(e) => setTextWrap(e.target.checked)}
+              />{' '}
+              Wrap in box
+            </span>
+            <small>Side handles set the box width; text reflows inside it.</small>
+          </label>
+          {selection.text.lineCount > TEXT_MAX_LINES && (
+            <p
+              className="text-panel__warning"
+              role="alert"
+              data-testid="text-overflow-warning"
+            >
+              Text wraps to more than {TEXT_MAX_LINES} lines and cannot be saved.
+              Shorten it or widen the box.
+            </p>
+          )}
+        </div>
+      )}
+      <button
+        type="button"
+        className="btn btn--ghost btn--small"
+        data-testid="delete-object"
+        onClick={removeActiveObject}
+        style={{ marginTop: 10 }}
+      >
+        Remove selected
+      </button>
+    </div>
+  ) : null;
+
   return (
-    <div className="editor-grid">
-      <div className="stage">
-        <div className="area-tabs" role="tablist" aria-label="Print areas">
+    <div className="studio">
+      {/* Always mounted so programmatic uploads work from any panel. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/png,image/jpeg"
+        style={{ display: 'none' }}
+        data-testid="upload-input"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void handleUpload(file);
+        }}
+      />
+
+      <header className="studio__topbar">
+        <Link href="/" className="studio__back" aria-label="Back to products">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M15 5l-7 7 7 7" />
+          </svg>
+        </Link>
+        <div className="studio__product">
+          <span className="studio__product-name">{template.name}</span>
+          <Link href="/" className="studio__change-product">
+            Change product
+          </Link>
+        </div>
+        {designId && (
+          <div className="badge" data-testid="editing-badge">
+            Editing saved design · {designId.slice(0, 8)}
+            {dirty ? ' · unsaved changes' : ''}
+          </div>
+        )}
+        <div className="studio__topbar-spacer" />
+        <div className="studio__history">
+          <button type="button" disabled title="Undo (coming soon)" aria-label="Undo">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M8 5L3 10l5 5" />
+              <path d="M3 10h11a6 6 0 0 1 0 12h-3" />
+            </svg>
+          </button>
+          <button type="button" disabled title="Redo (coming soon)" aria-label="Redo">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M16 5l5 5-5 5" />
+              <path d="M21 10H10a6 6 0 0 0 0 12h3" />
+            </svg>
+          </button>
+        </div>
+        <div className="studio__mode-tabs" role="group" aria-label="Editor mode">
+          <button type="button" className="studio__mode-tab studio__mode-tab--active">
+            Design
+          </button>
+          {designId ? (
+            <Link className="studio__mode-tab" href={`/designs/${designId}`} data-testid="mode-mockups">
+              Mockups
+            </Link>
+          ) : (
+            <button type="button" className="studio__mode-tab" disabled title="Save the design first">
+              Mockups
+            </button>
+          )}
+        </div>
+        <Link href="/designs" className="studio__close" aria-label="Close editor">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </Link>
+      </header>
+
+      <div className="studio__body">
+        <nav className="studio__toolrail" aria-label="Tools">
+          {TOOL_ORDER.map((key) => (
+            <button
+              key={key}
+              type="button"
+              className={tool === key ? 'studio__tool studio__tool--active' : 'studio__tool'}
+              data-testid={`tool-${key}`}
+              aria-pressed={tool === key}
+              onClick={() => setTool(key)}
+            >
+              {TOOL_ICONS[key]}
+              <span>{TOOL_LABELS[key]}</span>
+            </button>
+          ))}
+        </nav>
+
+        <aside className="studio__panel">
+          {tool === 'product' && (
+            <>
+              <p className="studio__panel-title">Product</p>
+              <div className="studio__panel-product">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={apiUrl(template.imageUrl)} alt={template.name} width={56} height={56} />
+                <div>
+                  <b>{template.name}</b>
+                  <span>
+                    {template.canvasWidth} x {template.canvasHeight} px canvas
+                  </span>
+                </div>
+              </div>
+              <div className="studio__panel-section">
+                <p className="studio__panel-title">Print sides</p>
+                <ul className="studio__area-list">
+                  {template.printAreas.map((a) => (
+                    <li key={a.key}>
+                      <button
+                        type="button"
+                        className={
+                          a.key === activeAreaKey
+                            ? 'studio__area-row studio__area-row--active'
+                            : 'studio__area-row'
+                        }
+                        onClick={() => setActiveAreaKey(a.key)}
+                      >
+                        {a.name}
+                        {areaCounts[a.key] ? (
+                          <span className="area-tab__count">{areaCounts[a.key]}</span>
+                        ) : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="studio__panel-section">
+                <Link href="/" className="studio__change-product">
+                  Change product
+                </Link>
+              </div>
+            </>
+          )}
+
+          {tool === 'uploads' && (
+            <>
+              <p className="studio__panel-title">Uploads</p>
+              <p className="studio__panel-copy">
+                PNG or JPEG, up to 10 MB. Artwork lands on <b>{activeArea?.name ?? 'the active side'}</b>.
+              </p>
+              <button
+                type="button"
+                className="btn"
+                data-testid="upload-button"
+                disabled={busy !== null}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {busy === 'upload' ? 'Uploading...' : 'Upload artwork'}
+              </button>
+              {selectionSection}
+            </>
+          )}
+
+          {tool === 'text' && (
+            <>
+              <p className="studio__panel-title">Text</p>
+              <p className="studio__panel-copy">
+                Add a line of text to <b>{activeArea?.name ?? 'the active side'}</b>, then style it
+                below.
+              </p>
+              <button
+                type="button"
+                className="btn"
+                data-testid="add-text-button"
+                disabled={busy !== null}
+                onClick={() => void handleAddText()}
+              >
+                Add text
+              </button>
+              {selectionSection}
+            </>
+          )}
+
+          {tool === 'saved' && (
+            <>
+              <p className="studio__panel-title">Saved design</p>
+              {designId ? (
+                <p className="studio__panel-copy">
+                  Editing <b>{designId.slice(0, 8)}</b>
+                  {dirty ? ', with unsaved changes.' : ', all changes saved.'}
+                </p>
+              ) : (
+                <p className="studio__panel-copy">
+                  This design has not been saved yet. Save it from the bar below to render mockups
+                  and find it in the library later.
+                </p>
+              )}
+              <div className="studio__panel-section">
+                <ul className="studio__area-list">
+                  {designId && (
+                    <li>
+                      <Link href={`/designs/${designId}`} className="studio__area-row">
+                        View mockups
+                      </Link>
+                    </li>
+                  )}
+                  <li>
+                    <Link href="/designs" className="studio__area-row">
+                      Open design library
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href={`/editor/${template.slug}`} className="studio__area-row">
+                      Start a fresh design
+                    </Link>
+                  </li>
+                </ul>
+              </div>
+            </>
+          )}
+
+          {tool === 'layers' && (
+            <>
+              <p className="studio__panel-title">Layers · {activeArea?.name ?? 'this side'}</p>
+              {layerObjects.length > 0 ? (
+                <ul className="studio__layer-list">
+                  {layerObjects.map((obj, index) => (
+                    <li key={index}>
+                      <button
+                        type="button"
+                        className={
+                          obj === activeCanvasObject
+                            ? 'studio__layer studio__layer--active'
+                            : 'studio__layer'
+                        }
+                        onClick={() => selectLayer(obj)}
+                      >
+                        {TOOL_ICONS[obj.kind === 'text' ? 'text' : 'uploads']}
+                        <span>
+                          {obj.kind === 'text'
+                            ? ((obj as DesignedText).text ?? 'Text').split('\n')[0]!.slice(0, 26) || 'Text'
+                            : 'Image'}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="studio__layer-empty">
+                  Nothing on this side yet. Upload artwork or add text to see it here.
+                </p>
+              )}
+              {selectionSection}
+            </>
+          )}
+        </aside>
+
+        <section className="studio__stage" aria-label="Design workspace">
+          <div
+            className="studio__canvas-wrap"
+            style={{ width: STAGE_WIDTH, height: stageHeight }}
+            data-testid="editor-stage"
+          >
+            <canvas ref={canvasElRef} width={STAGE_WIDTH} height={stageHeight} />
+          </div>
+
+          <p className="studio__hint">
+            The dashed <strong>frame</strong> is the printable area for{' '}
+            {activeArea?.name ?? 'this side'}.
+          </p>
+
+          <div className="studio__zoom" role="group" aria-label="Zoom">
+            <button
+              type="button"
+              aria-label="Zoom out"
+              disabled={viewZoom <= VIEW_ZOOM_MIN}
+              onClick={() => setViewZoom((v) => Math.max(VIEW_ZOOM_MIN, v / VIEW_ZOOM_STEP))}
+            >
+              −
+            </button>
+            <span className="studio__zoom-value" data-testid="zoom-value">
+              {zoomPercent}%
+            </span>
+            <button
+              type="button"
+              aria-label="Zoom in"
+              disabled={viewZoom >= VIEW_ZOOM_MAX}
+              onClick={() => setViewZoom((v) => Math.min(VIEW_ZOOM_MAX, v * VIEW_ZOOM_STEP))}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              aria-label="Fit product to view"
+              disabled={viewZoom === 1}
+              onClick={() => setViewZoom(1)}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="studio__status">
+            <div className={statusClass} data-testid="editor-status" aria-live="polite">
+              {status.message}
+              {status.details && status.details.length > 0 && (
+                <ul>
+                  {status.details.map((d) => (
+                    <li key={d}>{d}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <footer className="studio__bottombar">
+        <div className="studio__sides" role="tablist" aria-label="Print areas">
           {template.printAreas.map((a) => (
             <button
               key={a.key}
@@ -1043,257 +1635,18 @@ export function EditorClient({
               data-testid={`area-tab-${a.key}`}
               onClick={() => setActiveAreaKey(a.key)}
             >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={apiUrl(a.imageUrl ?? template.imageUrl)} alt="" width={30} height={30} />
               {a.name}
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}
             </button>
           ))}
         </div>
-        <div
-          className="stage__canvas-wrap"
-          style={{ width: STAGE_WIDTH, height: stageHeight }}
-          data-testid="editor-stage"
-        >
-          <canvas ref={canvasElRef} width={STAGE_WIDTH} height={stageHeight} />
-        </div>
-        <p className="stage__hint">
-          The dashed <strong>red frame</strong> is the printable area for{' '}
-          {activeArea?.name ?? 'this side'}. Artwork cannot be saved outside it.
+        <p className="studio__bottom-meta">
+          {totalObjects} object{totalObjects === 1 ? '' : 's'} across {placedAreas || 'no'} side
+          {placedAreas === 1 ? '' : 's'} · server validates every save per print area
         </p>
-      </div>
-
-      <aside className="rail">
-        {designId && (
-          <div className="badge" data-testid="editing-badge">
-            Editing saved design · {designId.slice(0, 8)}
-            {dirty ? ' · unsaved changes' : ''}
-          </div>
-        )}
-
-        <section className="step">
-          <div className="step__head">
-            <span className="step__num">01</span>
-            <span className="step__title">Artwork</span>
-          </div>
-          <p>
-            PNG or JPEG, up to 10 MB. Uploads land on <b>{activeArea?.name ?? 'the active side'}</b>.{' '}
-            {totalObjects} object{totalObjects === 1 ? '' : 's'} across {placedAreas || 'no'} area
-            {placedAreas === 1 ? '' : 's'}.
-          </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/png,image/jpeg"
-            style={{ display: 'none' }}
-            data-testid="upload-input"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleUpload(file);
-            }}
-          />
-          <button
-            type="button"
-            className="btn btn--ghost"
-            data-testid="upload-button"
-            disabled={busy !== null}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {busy === 'upload' ? 'Uploading...' : 'Upload artwork'}
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            data-testid="add-text-button"
-            disabled={busy !== null}
-            onClick={() => void handleAddText()}
-          >
-            Add text
-          </button>
-        </section>
-
-        <section className="step">
-          <div className="step__head">
-            <span className="step__num">02</span>
-            <span className="step__title">Position</span>
-          </div>
-          {selection ? (
-            <>
-              <div className="readout" data-testid="selection-readout">
-                <span>
-                  center <b>{selection.x}, {selection.y}</b>
-                </span>
-                <span>
-                  size <b>{selection.width} x {selection.height}</b>
-                </span>
-                <span>
-                  angle <b>{selection.rotation}deg</b>
-                </span>
-                {selection.quality && (
-                  <span
-                    className={`readout__quality readout__quality--${selection.quality.level}`}
-                    data-testid="dpi-readout"
-                    data-level={selection.quality.level}
-                  >
-                    print <b>~{selection.quality.effectiveDpi} DPI</b>,{' '}
-                    {QUALITY_COPY[selection.quality.level]}
-                  </span>
-                )}
-              </div>
-              {selection.text && (
-                <div className="text-panel" data-testid="text-panel">
-                  <p className="text-panel__hint">Double-click the text on the canvas to edit the wording.</p>
-                  <label className="text-panel__field">
-                    Font
-                    <select
-                      data-testid="text-font-select"
-                      value={selection.text.fontKey}
-                      onChange={(e) => {
-                        const key = e.target.value;
-                        const family = fontDefinitionOf(key)?.family;
-                        if (!family) return;
-                        updateActiveText((t) => {
-                          t.fontKey = key;
-                          t.set({ fontFamily: family });
-                        });
-                      }}
-                    >
-                      {FONT_WHITELIST.map((font) => (
-                        <option key={font.key} value={font.key} style={{ fontFamily: font.family }}>
-                          {font.family}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="text-panel__field">
-                    Color
-                    <div className="text-panel__swatches">
-                      {TEXT_SWATCHES.map((swatch) => (
-                        <button
-                          key={swatch}
-                          type="button"
-                          className="text-panel__swatch"
-                          data-testid={`text-swatch-${swatch.slice(1)}`}
-                          style={{ background: swatch }}
-                          aria-label={`Text color ${swatch}`}
-                          onClick={() => updateActiveText((t) => t.set({ fill: swatch }))}
-                        />
-                      ))}
-                      <input
-                        type="color"
-                        data-testid="text-color-input"
-                        value={selection.text.color}
-                        onChange={(e) => {
-                          const color = e.target.value; // native input always emits #rrggbb
-                          updateActiveText((t) => t.set({ fill: color }));
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <label className="text-panel__field">
-                    Size
-                    <input
-                      type="number"
-                      data-testid="text-size-input"
-                      min={FONT_SIZE_MIN}
-                      max={FONT_SIZE_MAX}
-                      value={selection.text.fontSize}
-                      onChange={(e) => {
-                        const size = Number(e.target.value);
-                        if (!Number.isFinite(size)) return;
-                        const clamped = Math.min(Math.max(size, FONT_SIZE_MIN), FONT_SIZE_MAX);
-                        updateActiveText((t) => {
-                          // Reset any interactive scale so the typed size IS the size.
-                          t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
-                        });
-                      }}
-                    />
-                  </label>
-                  <div className="text-panel__field" role="group" aria-label="Text alignment">
-                    Align
-                    <div className="text-panel__align">
-                      {(['left', 'center', 'right'] as const).map((align) => (
-                        <button
-                          key={align}
-                          type="button"
-                          data-testid={`text-align-${align}`}
-                          className={
-                            selection.text?.align === align
-                              ? 'btn btn--ghost btn--small btn--active'
-                              : 'btn btn--ghost btn--small'
-                          }
-                          onClick={() => updateActiveText((t) => t.set({ textAlign: align }))}
-                        >
-                          {align}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="text-panel__field" role="group" aria-label="Text direction">
-                    Direction
-                    <div className="text-panel__align">
-                      {(['auto', 'ltr', 'rtl'] as const).map((dir) => (
-                        <button
-                          key={dir}
-                          type="button"
-                          data-testid={`text-direction-${dir}`}
-                          data-resolved={
-                            dir === 'auto' ? selection.text?.resolvedDirection : undefined
-                          }
-                          className={
-                            selection.text?.direction === dir
-                              ? 'btn btn--ghost btn--small btn--active'
-                              : 'btn btn--ghost btn--small'
-                          }
-                          onClick={() => setTextDirection(dir)}
-                        >
-                          {dir === 'auto' ? `auto (${selection.text?.resolvedDirection})` : dir}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <label className="text-panel__field text-panel__wrap">
-                    <span>
-                      <input
-                        type="checkbox"
-                        data-testid="text-wrap-toggle"
-                        checked={selection.text.wrap}
-                        onChange={(e) => setTextWrap(e.target.checked)}
-                      />{' '}
-                      Wrap in box
-                    </span>
-                    <small>Side handles set the box width; text reflows inside it.</small>
-                  </label>
-                  {selection.text.lineCount > TEXT_MAX_LINES && (
-                    <p
-                      className="text-panel__warning"
-                      role="alert"
-                      data-testid="text-overflow-warning"
-                    >
-                      Text wraps to more than {TEXT_MAX_LINES} lines and cannot be saved.
-                      Shorten it or widen the box.
-                    </p>
-                  )}
-                </div>
-              )}
-              <button
-                type="button"
-                className="btn btn--ghost btn--small"
-                data-testid="delete-object"
-                onClick={removeActiveObject}
-              >
-                Remove selected
-              </button>
-            </>
-          ) : (
-            <p>Select an object on the canvas to see its position. Drag corners to resize, the top handle to rotate.</p>
-          )}
-        </section>
-
-        <section className="step">
-          <div className="step__head">
-            <span className="step__num">03</span>
-            <span className="step__title">Save</span>
-          </div>
-          <p>Front and back save together as one design, validated on the server per print area.</p>
+        <div className="studio__ctas">
           <button
             type="button"
             className="btn"
@@ -1303,40 +1656,18 @@ export function EditorClient({
           >
             {saveLabel}
           </button>
-        </section>
-
-        <section className="step">
-          <div className="step__head">
-            <span className="step__num">04</span>
-            <span className="step__title">Mockups</span>
-          </div>
-          <p>
-            {dirty && designId
-              ? 'Unsaved changes. Save first, then render the fresh previews.'
-              : 'Server-side render with sharp: one mockup for every side that has artwork.'}
-          </p>
           <button
             type="button"
             className="btn btn--accent"
             data-testid="generate-mockup"
             disabled={busy !== null || !designId || dirty}
             onClick={() => void handleRender()}
+            title={dirty && designId ? 'Save your changes first' : undefined}
           >
             {busy === 'render' ? 'Rendering...' : 'Generate mockups'}
           </button>
-        </section>
-
-        <div className={statusClass} data-testid="editor-status" aria-live="polite">
-          {status.message}
-          {status.details && status.details.length > 0 && (
-            <ul>
-              {status.details.map((d) => (
-                <li key={d}>{d}</li>
-              ))}
-            </ul>
-          )}
         </div>
-      </aside>
+      </footer>
     </div>
   );
 }

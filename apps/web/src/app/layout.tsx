@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
 import { Archivo, Fraunces } from 'next/font/google';
 import './globals.css';
 
@@ -21,29 +20,15 @@ export const metadata: Metadata = {
   description: 'Place your artwork on real products and get a production-style mockup back.',
 };
 
+/**
+ * Root layout carries only fonts and the document shell. Page chrome lives in the
+ * route groups: (site) wraps marketing/library pages in the header/footer shell,
+ * (studio) renders the full-screen editor with no chrome at all.
+ */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${fraunces.variable} ${archivo.variable}`}>
-      <body>
-        <div className="shell">
-          <header className="topbar">
-            <a href="/" className="topbar__mark">
-              FoloPrint <em>Design Studio</em>
-            </a>
-            <nav className="topbar__nav">
-              <Link href="/designs" className="topbar__link" data-testid="nav-designs">
-                Design Library
-              </Link>
-              <span className="topbar__meta">Proof of concept</span>
-            </nav>
-          </header>
-          <main className="main">{children}</main>
-          <footer className="footer">
-            <span>FoloPrint Design Studio</span>
-            <span>Standalone editor, not connected to the store</span>
-          </footer>
-        </div>
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

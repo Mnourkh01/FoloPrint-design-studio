@@ -75,6 +75,7 @@ test('arabic text: auto RTL, wrap in box, reflow, save, render, reopen', async (
   await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
 
   // --- Add text, replace the content with Arabic through the editing path ---
+  await page.getByTestId('tool-text').click(); // open the Text panel in the studio rail
   await page.getByTestId('add-text-button').click();
   await page.waitForFunction(
     () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),
@@ -169,6 +170,7 @@ test('overflow warning: more than 8 wrapped lines blocks saving', async ({ page 
   await page.goto('/editor/classic-tee');
   await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
 
+  await page.getByTestId('tool-text').click(); // open the Text panel in the studio rail
   await page.getByTestId('add-text-button').click();
   await page.waitForFunction(
     () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),

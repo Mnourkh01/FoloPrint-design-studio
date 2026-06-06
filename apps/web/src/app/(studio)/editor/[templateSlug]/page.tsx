@@ -5,6 +5,15 @@ import { EditorClient } from './editor-client';
 
 export const dynamic = 'force-dynamic';
 
+/** Centered fallback for load errors; the studio layout has no site chrome. */
+function StudioNotice({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="studio-notice">
+      <div className="notice">{children}</div>
+    </div>
+  );
+}
+
 export default async function EditorPage({
   params,
   searchParams,
@@ -24,18 +33,18 @@ export default async function EditorPage({
         initialDesign = await fetchDesign(designId);
       } catch {
         return (
-          <div className="notice">
+          <StudioNotice>
             <strong>Saved design not found.</strong>
             <p>
               The design <code>{designId}</code> does not exist anymore.{' '}
               <Link href={`/editor/${templateSlug}`}>Start a fresh design</Link> instead.
             </p>
-          </div>
+          </StudioNotice>
         );
       }
       if (initialDesign.templateSlug !== templateSlug) {
         return (
-          <div className="notice">
+          <StudioNotice>
             <strong>This design belongs to a different template.</strong>
             <p>
               Open it on its own template instead:{' '}
@@ -43,32 +52,21 @@ export default async function EditorPage({
                 {initialDesign.templateSlug}
               </Link>
             </p>
-          </div>
+          </StudioNotice>
         );
       }
     }
 
-    return (
-      <>
-        <div className="editor-head">
-          <h1>{template.name}</h1>
-          <span className="crumb">
-            <Link href="/">Templates</Link> / {template.slug}
-            {initialDesign ? <> / design {initialDesign.id.slice(0, 8)}</> : null}
-          </span>
-        </div>
-        <EditorClient template={template} initialDesign={initialDesign} />
-      </>
-    );
+    return <EditorClient template={template} initialDesign={initialDesign} />;
   } catch {
     return (
-      <div className="notice">
+      <StudioNotice>
         <strong>Could not load this template.</strong>
         <p>
           Check that the API is running and the template <code>{templateSlug}</code> exists, then
           refresh. <Link href="/">Back to templates</Link>.
         </p>
-      </div>
+      </StudioNotice>
     );
   }
 }

@@ -66,6 +66,7 @@ test('text objects: add, style, move, resize, save, render, reopen', async ({ pa
   await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
 
   // --- Add: a text object lands centered in the front area, selected ---
+  await page.getByTestId('tool-text').click(); // open the Text panel in the studio rail
   await page.getByTestId('add-text-button').click();
   await page.waitForFunction(
     () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),
@@ -181,6 +182,7 @@ test('mixed design: image and text on the same area save and render together', a
   );
 
   // Then text on the same area.
+  await page.getByTestId('tool-text').click(); // open the Text panel in the studio rail
   await page.getByTestId('add-text-button').click();
   await page.waitForFunction(
     () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -11,6 +12,9 @@ import {
   validateDesignPlacements,
   type AnyDesignDocument,
   type DesignDocument,
+  type DesignListDto,
+  type DesignListItemDto,
+  type DesignPlacementSummaryDto,
   type DesignPreviewDto,
   type DesignProjectDto,
   type PlacementValidationError,
@@ -35,10 +39,38 @@ type PreviewPathsMap = Record<string, StoredPreview>;
 
 @Injectable()
 export class DesignsService {
+  private readonly logger = new Logger(DesignsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
   ) {}
+
+  /**
+   * Paginated design library, newest update first with id DESC as a deterministic
+   * tie-breaker (bulk-created rows can share a timestamp; without it pagination could
+   * duplicate or skip rows). findMany and count run in one transaction so the page
+   * math is consistent with the rows returned.
+   */
+  async list(page: number, pageSize: number): Promise<DesignListDto> {
+    const [rows, totalItems] = await this.prisma.$transaction([
+      this.prisma.designProject.findMany({
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        include: { productTemplate: { include: { printAreas: true } } },
+      }),
+      this.prisma.designProject.count(),
+    ]);
+
+    return {
+      items: rows.map((design) => this.toListItemDto(design)),
+      page,
+      pageSize,
+      totalItems,
+      totalPages: Math.ceil(totalItems / pageSize),
+    };
+  }
 
   /**
    * Server-side authority for design validity: template must exist and be active, every
@@ -277,19 +309,60 @@ export class DesignsService {
     previews: PreviewPathsMap,
     printAreas: PrintArea[],
   ): DesignPreviewDto[] {
-    const orderOf = new Map(printAreas.map((a) => [a.key, a.sortOrder]));
     return Object.entries(previews)
       .map(([printAreaKey, preview]) => ({
         printAreaKey,
         previewUrl: `/designs/${designId}/preview/${encodeURIComponent(printAreaKey)}`,
         renderedAt: preview.renderedAt,
       }))
-      .sort(
-        (a, b) =>
-          (orderOf.get(a.printAreaKey) ?? Number.MAX_SAFE_INTEGER) -
-            (orderOf.get(b.printAreaKey) ?? Number.MAX_SAFE_INTEGER) ||
-          a.printAreaKey.localeCompare(b.printAreaKey),
+      .sort(this.byAreaOrder(printAreas, (p) => p.printAreaKey));
+  }
+
+  /** Comparator: template area sortOrder first (front before back), key as fallback. */
+  private byAreaOrder<T>(printAreas: PrintArea[], keyOf: (item: T) => string) {
+    const orderOf = new Map(printAreas.map((a) => [a.key, a.sortOrder]));
+    return (a: T, b: T): number =>
+      (orderOf.get(keyOf(a)) ?? Number.MAX_SAFE_INTEGER) -
+        (orderOf.get(keyOf(b)) ?? Number.MAX_SAFE_INTEGER) ||
+      keyOf(a).localeCompare(keyOf(b));
+  }
+
+  /**
+   * Library row summary: template info, per-area object counts, preview metadata.
+   * Never includes the design document. A row whose stored document cannot be read
+   * degrades to placements: [] instead of failing the whole list; only the design id
+   * and the error message are logged, never the document itself.
+   */
+  private toListItemDto(design: DesignWithTemplate): DesignListItemDto {
+    const template = design.productTemplate;
+
+    let placements: DesignPlacementSummaryDto[] = [];
+    try {
+      const document = this.normalizedDocumentOf(design);
+      const nameOf = new Map(template.printAreas.map((a) => [a.key, a.name]));
+      placements = document.placements
+        .map((placement) => ({
+          printAreaKey: placement.printAreaKey,
+          printAreaName: nameOf.get(placement.printAreaKey) ?? placement.printAreaKey,
+          objectCount: placement.objects.length,
+        }))
+        .sort(this.byAreaOrder(template.printAreas, (s) => s.printAreaKey));
+    } catch (error) {
+      this.logger.warn(
+        `Design "${design.id}" has an unreadable document; listed without placements: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
       );
+    }
+
+    return {
+      id: design.id,
+      template: { id: template.id, name: template.name, slug: template.slug },
+      placements,
+      previews: this.toPreviewDtos(design.id, this.previewPathsOf(design), template.printAreas),
+      createdAt: design.createdAt.toISOString(),
+      updatedAt: design.updatedAt.toISOString(),
+    };
   }
 
   private formatPlacementError(error: PlacementValidationError): string {

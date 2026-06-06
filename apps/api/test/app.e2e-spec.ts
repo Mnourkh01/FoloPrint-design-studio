@@ -10,6 +10,8 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/app.setup';
 import { PrismaService } from '../src/prisma/prisma.service';
 import type {
+  DesignListDto,
+  DesignListItemDto,
   DesignProjectDto,
   PrintAreaDto,
   ProductTemplateDto,
@@ -556,6 +558,199 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     it('404s for an unrendered design preview and unknown design', async () => {
       await http().get('/designs/00000000-0000-4000-8000-000000000000').expect(404);
       await http().get('/designs/00000000-0000-4000-8000-000000000000/preview/front').expect(404);
+    });
+  });
+
+  describe('GET /designs (design library)', () => {
+    // Each test owns the whole table for deterministic list assertions. Earlier blocks
+    // create their own fixtures per test, so wiping here cannot break them.
+    beforeEach(async () => {
+      await prisma.designProject.deleteMany();
+    });
+
+    const createFrontOnlyDesign = async (assetId: string): Promise<DesignProjectDto> => {
+      const res = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), assetId)] }],
+        })
+        .expect(201);
+      return res.body as DesignProjectDto;
+    };
+
+    it('returns an empty list when no designs exist', async () => {
+      const res = await http().get('/designs').expect(200);
+      expect(res.body).toEqual({ items: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0 });
+    });
+
+    it('lists newest first with template info and per-area object counts, no design document', async () => {
+      const asset = await uploadPng();
+      const a = await createFrontBackDesign(asset.id);
+      const bRes = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          placements: [
+            {
+              printAreaKey: 'back',
+              objects: [objectIn(area('back'), asset.id), objectIn(area('back'), asset.id)],
+            },
+          ],
+        })
+        .expect(201);
+      const b = bRes.body as DesignProjectDto;
+
+      // Updating A makes it the most recently touched design -> first in the list.
+      await http()
+        .put(`/designs/${a.id}`)
+        .send({
+          templateId: template.id,
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+        })
+        .expect(200);
+
+      const res = await http().get('/designs').expect(200);
+      const list = res.body as DesignListDto;
+
+      expect(list.totalItems).toBe(2);
+      expect(list.totalPages).toBe(1);
+      expect(list.items.map((i) => i.id)).toEqual([a.id, b.id]);
+
+      const [first, second] = list.items as [DesignListItemDto, DesignListItemDto];
+      expect(first.template).toEqual({ id: template.id, name: 'Classic Tee', slug: 'classic-tee' });
+      expect(first.placements).toEqual([
+        { printAreaKey: 'front', printAreaName: area('front').name, objectCount: 1 },
+      ]);
+      expect(second.placements).toEqual([
+        { printAreaKey: 'back', printAreaName: area('back').name, objectCount: 2 },
+      ]);
+      expect(Date.parse(first.createdAt)).not.toBeNaN();
+      expect(Date.parse(first.updatedAt)).not.toBeNaN();
+
+      // Summary only: the list never carries the design document.
+      expect(first).not.toHaveProperty('design');
+      expect(JSON.stringify(list)).not.toMatch(/designJson|"version"|"rotation"/);
+
+      // GET /designs/:id keeps working alongside the list route.
+      const single = await http().get(`/designs/${a.id}`).expect(200);
+      expect((single.body as DesignProjectDto).id).toBe(a.id);
+    });
+
+    it('breaks updatedAt ties by id DESC so pagination never duplicates or skips rows', async () => {
+      const sharedTimestamp = new Date('2026-01-01T00:00:00.000Z');
+      const lowId = '00000000-0000-4000-8000-00000000000a';
+      const highId = '00000000-0000-4000-8000-00000000000b';
+      for (const id of [lowId, highId]) {
+        await prisma.designProject.create({
+          data: {
+            id,
+            productTemplateId: template.id,
+            designJson: { version: 2, templateId: template.id, placements: [] },
+            createdAt: sharedTimestamp,
+            updatedAt: sharedTimestamp,
+          },
+        });
+      }
+
+      const res = await http().get('/designs').expect(200);
+      const ids = (res.body as DesignListDto).items.map((i) => i.id);
+      expect(ids).toEqual([highId, lowId]);
+    });
+
+    it('paginates 5 designs as 2/2/1 with no duplicates across pages', async () => {
+      const asset = await uploadPng();
+      for (let i = 0; i < 5; i += 1) {
+        await createFrontOnlyDesign(asset.id);
+      }
+
+      const pages = [];
+      for (const page of [1, 2, 3]) {
+        const res = await http().get(`/designs?page=${page}&pageSize=2`).expect(200);
+        pages.push(res.body as DesignListDto);
+      }
+
+      expect(pages.map((p) => p.items.length)).toEqual([2, 2, 1]);
+      for (const page of pages) {
+        expect(page.totalItems).toBe(5);
+        expect(page.totalPages).toBe(3);
+        expect(page.pageSize).toBe(2);
+      }
+      const allIds = pages.flatMap((p) => p.items.map((i) => i.id));
+      expect(new Set(allIds).size).toBe(5);
+    });
+
+    it('clamps out-of-range page and pageSize instead of erroring', async () => {
+      const oversized = await http().get('/designs?pageSize=500').expect(200);
+      expect((oversized.body as DesignListDto).pageSize).toBe(50);
+
+      const zeroSize = await http().get('/designs?pageSize=0').expect(200);
+      expect((zeroSize.body as DesignListDto).pageSize).toBe(1);
+
+      const zeroPage = await http().get('/designs?page=0').expect(200);
+      expect((zeroPage.body as DesignListDto).page).toBe(1);
+
+      // A page past the end is empty but reports correct totals.
+      const beyond = await http().get('/designs?page=99').expect(200);
+      expect((beyond.body as DesignListDto).items).toEqual([]);
+      expect((beyond.body as DesignListDto).page).toBe(99);
+    });
+
+    it('400s on non-integer params and unknown query params', async () => {
+      await http().get('/designs?page=abc').expect(400);
+      await http().get('/designs?page=1.5').expect(400);
+      await http().get('/designs?pageSize=abc').expect(400);
+      await http().get('/designs?hacker=1').expect(400); // forbidNonWhitelisted
+    });
+
+    it('carries preview metadata for rendered designs, ordered by area sortOrder, with no path leaks', async () => {
+      const asset = await uploadPng();
+      const design = await createFrontBackDesign(asset.id);
+      await http().post(`/designs/${design.id}/render`).expect(201);
+
+      const res = await http().get('/designs').expect(200);
+      const list = res.body as DesignListDto;
+      const item = list.items.find((i) => i.id === design.id)!;
+      expect(item).toBeDefined();
+
+      // front before back: template sortOrder, not render or key order.
+      expect(item.previews.map((p) => p.printAreaKey)).toEqual(['front', 'back']);
+      for (const preview of item.previews) {
+        expect(preview.previewUrl).toBe(`/designs/${design.id}/preview/${preview.printAreaKey}`);
+        expect(Date.parse(preview.renderedAt)).not.toBeNaN();
+      }
+
+      const raw = JSON.stringify(list);
+      expect(raw).not.toMatch(/storagePath|previewPaths/);
+      expect(raw).not.toMatch(/previews[\\/][^"]*\.png/); // raw storage prefix
+      expect(raw).not.toMatch(/[A-Z]:\\\\/); // no Windows absolute paths
+      expect(raw).not.toMatch(/(^|[^:])\/(home|var|tmp)\//); // no Unix absolute paths
+    });
+
+    it('does not 500 the list when one stored document is corrupt', async () => {
+      const asset = await uploadPng();
+      const good = await createFrontBackDesign(asset.id);
+      const corrupt = await prisma.designProject.create({
+        data: {
+          productTemplateId: template.id,
+          designJson: { version: 99, nonsense: true },
+        },
+      });
+
+      const res = await http().get('/designs').expect(200);
+      const list = res.body as DesignListDto;
+      expect(list.totalItems).toBe(2);
+
+      const corruptItem = list.items.find((i) => i.id === corrupt.id)!;
+      expect(corruptItem).toBeDefined();
+      expect(corruptItem.placements).toEqual([]); // degraded, not dropped
+      expect(corruptItem.template.slug).toBe('classic-tee');
+
+      const goodItem = list.items.find((i) => i.id === good.id)!;
+      expect(goodItem.placements).toHaveLength(2);
+
+      // The single-design route still reports the corruption loudly.
+      await http().get(`/designs/${corrupt.id}`).expect(500);
     });
   });
 });

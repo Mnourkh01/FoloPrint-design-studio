@@ -131,3 +131,43 @@ export interface RenderResultDto {
   designId: string;
   previews: DesignPreviewDto[];
 }
+
+// ---------------------------------------------------------------------------
+// Design library (paginated list) shapes
+// ---------------------------------------------------------------------------
+
+/** Per-area summary for the design library; counts only, never object geometry. */
+export interface DesignPlacementSummaryDto {
+  printAreaKey: string;
+  /** Human name from the template's print area; falls back to the key. */
+  printAreaName: string;
+  objectCount: number;
+}
+
+/**
+ * One row in the design library. Deliberately excludes the design document:
+ * the list is for finding and reopening designs, not for editing them.
+ */
+export interface DesignListItemDto {
+  id: string;
+  template: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+  /** Ordered by the template's area sortOrder (front before back). */
+  placements: DesignPlacementSummaryDto[];
+  /** Same shape and ordering as DesignProjectDto.previews; empty until rendered. */
+  previews: DesignPreviewDto[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Paginated design library response; page/pageSize echo the clamped effective values. */
+export interface DesignListDto {
+  items: DesignListItemDto[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+}

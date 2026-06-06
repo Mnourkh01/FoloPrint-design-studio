@@ -50,7 +50,9 @@ npm run dev:web            # Next.js on http://localhost:3000  (second terminal)
 
 Open http://localhost:3000, open the sample tee, upload a PNG/JPEG logo, position it, Save Design,
 Generate Mockup. From a design's preview page, "Edit design" re-opens it in the editor
-(`/editor/:slug?design=:id`); saving there updates the same design and clears the stale preview.
+(`/editor/:slug?design=:id`); saving there updates the same design and clears the stale previews.
+The Design Library (`/designs`, linked from the topbar) lists all saved designs with thumbnails,
+newest first, with View and Edit actions.
 
 ## Tests
 
@@ -75,15 +77,16 @@ First Playwright run may need `npx playwright install chromium`.
 | POST | `/assets/upload` | multipart upload, PNG/JPEG only, validated by real bytes |
 | GET | `/assets/:id/file` | uploaded asset (streamed) |
 | POST | `/designs` | save design JSON (server-side geometry validation) |
-| GET | `/designs/:id` | design + preview URL |
-| PUT | `/designs/:id` | replace design JSON (same validation; clears the stale preview) |
-| POST | `/designs/:id/render` | compose mockup PNG with sharp |
-| GET | `/designs/:id/preview` | rendered mockup (streamed) |
+| GET | `/designs` | paginated design library (summaries: template, object counts, preview metadata) |
+| GET | `/designs/:id` | design + preview URLs |
+| PUT | `/designs/:id` | replace design JSON (same validation; clears all stale previews) |
+| POST | `/designs/:id/render` | compose one mockup PNG per placed area with sharp |
+| GET | `/designs/:id/preview/:printAreaKey` | rendered area mockup (streamed) |
 
 ## Project structure
 
 ```
-apps/web              Next.js editor (/, /editor/[templateSlug], /designs/[id])
+apps/web              Next.js editor (/, /editor/[templateSlug], /designs, /designs/[id])
 apps/api              NestJS API + Prisma schema + seed + e2e tests
 packages/shared       design contract types + print-area geometry validation
 packages/renderer     sharp mockup compositor
@@ -93,7 +96,7 @@ docker-compose.yml    Postgres 16 (host port 5433)
 
 ## MVP limitations
 
-- One seeded template, one print area, raster uploads only (no SVG by design)
+- One seeded template (front + back print areas), raster uploads only (no SVG by design)
 - No auth; designs are anonymous
 - Inline rendering (no queue); local filesystem storage (S3/R2 swap designed, not built)
 - Editor not optimized for mobile

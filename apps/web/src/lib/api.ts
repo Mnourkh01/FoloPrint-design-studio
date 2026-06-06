@@ -1,5 +1,6 @@
 import type {
   DesignDocument,
+  DesignListDto,
   DesignProjectDto,
   ProductTemplateDto,
   RenderResultDto,
@@ -94,6 +95,11 @@ export function assetFileUrl(assetId: string): string {
 
 export async function fetchDesign(id: string): Promise<DesignProjectDto> {
   return handle(await fetch(apiUrl(`/designs/${encodeURIComponent(id)}`), { cache: 'no-store' }));
+}
+
+/** Paginated design library; the server clamps page/pageSize and echoes effective values. */
+export async function fetchDesigns(page = 1): Promise<DesignListDto> {
+  return handle(await fetch(apiUrl(`/designs?page=${page}`), { cache: 'no-store' }));
 }
 
 export async function renderDesign(id: string): Promise<RenderResultDto> {

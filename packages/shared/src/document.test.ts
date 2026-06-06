@@ -72,7 +72,7 @@ describe('normalizeDesignDocument', () => {
     expect(normalized.placements[0]?.objects).toEqual([{ type: 'image', ...legacyObject(FRONT) }]);
   });
 
-  it('adds the image type to legacy v2 objects and keeps typed objects as-is', () => {
+  it('adds the image type to legacy v2 objects and defaults text direction/wrap', () => {
     const v2 = {
       version: 2 as const,
       templateId: TEMPLATE_ID,
@@ -85,7 +85,26 @@ describe('normalizeDesignDocument', () => {
     const normalized = normalizeDesignDocument(v2);
 
     expect(normalized.placements[0]?.objects).toEqual([{ type: 'image', ...legacyObject(FRONT) }]);
-    expect(normalized.placements[1]?.objects).toEqual(v2.placements[1]?.objects);
+    // Images pass through untouched; pre-v1.6 text objects gain the additive defaults.
+    expect(normalized.placements[1]?.objects).toEqual([
+      v2.placements[1]!.objects[0],
+      { ...v2.placements[1]!.objects[1], direction: 'auto', wrapMode: 'none' },
+    ]);
+  });
+
+  it('keeps explicit text direction/wrapMode/wrappedLines on normalize', () => {
+    const wrapped = textObject(BACK, {
+      text: 'Hello world',
+      direction: 'rtl',
+      wrapMode: 'box',
+      wrappedLines: ['Hello', 'world'],
+    });
+    const normalized = normalizeDesignDocument({
+      version: 2,
+      templateId: TEMPLATE_ID,
+      placements: [{ printAreaKey: 'back', objects: [wrapped] }],
+    });
+    expect(normalized.placements[0]?.objects[0]).toEqual(wrapped);
   });
 
   it('throws on an unknown document version', () => {

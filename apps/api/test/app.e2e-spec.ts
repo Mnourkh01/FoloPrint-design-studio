@@ -715,6 +715,152 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('text RTL + wrap (v1.6)', () => {
+    const textIn = (
+      a: PrintAreaDto,
+      overrides: Partial<Record<string, unknown>> = {},
+    ) => ({
+      type: 'text',
+      text: 'Hello print',
+      fontFamily: 'inter',
+      fontSize: 48,
+      color: '#cc0033',
+      align: 'center',
+      x: a.x + a.width / 2,
+      y: a.y + a.height / 2,
+      width: 180,
+      height: 60,
+      rotation: 0,
+      ...overrides,
+    });
+
+    const postFrontObjects = (objects: object[]) =>
+      http()
+        .post('/designs')
+        .send({ templateId: template.id, placements: [{ printAreaKey: 'front', objects }] });
+
+    it('saves, renders, and reopens Arabic text with auto direction', async () => {
+      const res = await postFrontObjects([
+        textIn(area('front'), { text: 'مرحبا بالعالم', fontFamily: 'noto-naskh-arabic' }),
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      // Normalization fills the additive defaults at read time.
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({
+        type: 'text',
+        text: 'مرحبا بالعالم',
+        fontFamily: 'noto-naskh-arabic',
+        direction: 'auto',
+        wrapMode: 'none',
+      });
+
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      const png = await fetchPngBuffer(`/designs/${dto.id}/preview/front`);
+      expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+
+      const reopened = await http().get(`/designs/${dto.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        text: 'مرحبا بالعالم',
+        direction: 'auto',
+      });
+    });
+
+    it('saves and renders Arabic text with explicit rtl direction', async () => {
+      const res = await postFrontObjects([
+        textIn(area('front'), {
+          text: 'مرحبا ABC',
+          fontFamily: 'noto-naskh-arabic',
+          direction: 'rtl',
+        }),
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({ direction: 'rtl' });
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      await http().get(`/designs/${dto.id}/preview/front`).expect(200);
+    });
+
+    it('saves and renders box-wrapped text and round-trips wrappedLines', async () => {
+      const res = await postFrontObjects([
+        textIn(area('front'), {
+          text: 'wraps neatly inside the box',
+          wrapMode: 'box',
+          wrappedLines: ['wraps neatly', 'inside the box'],
+          height: 100,
+        }),
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({
+        wrapMode: 'box',
+        wrappedLines: ['wraps neatly', 'inside the box'],
+      });
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      const png = await fetchPngBuffer(`/designs/${dto.id}/preview/front`);
+      expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    });
+
+    it('rejects unknown direction and wrapMode values', async () => {
+      await postFrontObjects([textIn(area('front'), { direction: 'up' })]).expect(400);
+      await postFrontObjects([textIn(area('front'), { wrapMode: 'char' })]).expect(400);
+    });
+
+    it('rejects wrappedLines without box mode and box mode without wrappedLines', async () => {
+      const res1 = await postFrontObjects([
+        textIn(area('front'), { wrappedLines: ['Hello print'] }),
+      ]).expect(400);
+      expect(JSON.stringify(res1.body)).toMatch(/only allowed when wrapMode/);
+      const res2 = await postFrontObjects([
+        textIn(area('front'), { wrapMode: 'box' }),
+      ]).expect(400);
+      expect(JSON.stringify(res2.body)).toMatch(/wrappedLines is required/);
+    });
+
+    it('rejects more than 8 wrapped lines', async () => {
+      const words = Array(9).fill('x');
+      await postFrontObjects([
+        textIn(area('front'), {
+          text: words.join(' '),
+          wrapMode: 'box',
+          wrappedLines: words,
+        }),
+      ]).expect(400);
+    });
+
+    it('rejects forged wrappedLines via reconciliation', async () => {
+      const res = await postFrontObjects([
+        textIn(area('front'), {
+          text: 'Hello print',
+          wrapMode: 'box',
+          wrappedLines: ['Totally', 'different'],
+        }),
+      ]).expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/does not reconcile/);
+    });
+
+    it('rejects bidi control characters in stored text and wrappedLines', async () => {
+      await postFrontObjects([textIn(area('front'), { text: 'bad\u200Ftext' })]).expect(400);
+      await postFrontObjects([
+        textIn(area('front'), {
+          text: 'Hello print',
+          wrapMode: 'box',
+          wrappedLines: ['Hello\u202Eprint'],
+        }),
+      ]).expect(400);
+    });
+
+    it('rejects v1.6 text fields on an image object', async () => {
+      const asset = await uploadPng();
+      const res = await postFrontObjects([
+        { ...objectIn(area('front'), asset.id), type: 'image', direction: 'rtl' },
+      ]).expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/must not carry text fields/);
+    });
+
+    it('keeps pre-v1.6 explicit-break behavior: 9 raw lines rejected without box mode', async () => {
+      await postFrontObjects([
+        textIn(area('front'), { text: Array(9).fill('x').join('\n') }),
+      ]).expect(400);
+    });
+  });
+
   describe('GET /fonts/:key/file', () => {
     it('streams a whitelisted font as TTF', async () => {
       const res = await http()

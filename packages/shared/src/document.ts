@@ -12,11 +12,16 @@ import type {
 /**
  * Normalizes one stored object to the current discriminated-union shape.
  * Objects saved before v1.5 carry no `type`; they are images by construction
- * (assetId was the only kind that existed). Typed objects pass through.
+ * (assetId was the only kind that existed). Text objects saved before v1.6
+ * carry no direction/wrapMode; they default to 'auto'/'none' (purely additive,
+ * document version stays v2).
  */
 export function normalizeDesignObject(obj: StoredDesignObject): DesignObject {
   if (obj.type === undefined) {
     return { type: 'image', ...obj };
+  }
+  if (obj.type === 'text') {
+    return { ...obj, direction: obj.direction ?? 'auto', wrapMode: obj.wrapMode ?? 'none' };
   }
   return obj;
 }

@@ -12,6 +12,7 @@ import {
   evaluateObjectQuality,
   normalizeDesignDocument,
   printAreaPpi,
+  resolveTextDirection,
   validateDesignPlacements,
   worseQualityLevel,
   type AnyDesignDocument,
@@ -203,6 +204,11 @@ export class DesignsService {
         fontSize: o.fontSize!,
         color: o.color!,
         align: o.align!,
+        // Optional v1.6 fields are picked only when present so a pre-v1.6 payload
+        // persists byte-identical (normalization adds the defaults at read time).
+        ...(o.direction !== undefined ? { direction: o.direction } : {}),
+        ...(o.wrapMode !== undefined ? { wrapMode: o.wrapMode } : {}),
+        ...(o.wrappedLines !== undefined ? { wrappedLines: o.wrappedLines } : {}),
         ...base,
       };
     }
@@ -254,13 +260,20 @@ export class DesignsService {
         const base = { x: obj.x, y: obj.y, width: obj.width, height: obj.height, rotation: obj.rotation };
         if (obj.type === 'text') {
           // The renderer resolves the whitelist key to its bundled font file itself.
+          // The service resolves 'auto' direction (shared first-strong scan) and maps
+          // the final visual lines: the editor's wrappedLines for box mode, explicit
+          // breaks otherwise. The renderer never re-wraps and never guesses direction.
           return {
             type: 'text',
-            text: obj.text,
+            lines:
+              obj.wrapMode === 'box' && obj.wrappedLines
+                ? obj.wrappedLines
+                : obj.text.split('\n'),
             fontFamily: obj.fontFamily,
             fontSize: obj.fontSize,
             color: obj.color,
             align: obj.align,
+            direction: resolveTextDirection(obj.text, obj.direction),
             ...base,
           };
         }

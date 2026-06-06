@@ -69,9 +69,10 @@ persisted or rendered.
 - [x] Design re-open and edit restores every area
 - See `docs/v1.2-multi-print-areas.md` for the technical plan
 
-### Stable (next slice)
-- Text objects with font rendering
-- Per-template print-area DPI guidance and low-resolution warnings
+### Stable (shipped)
+- [x] Text objects with font rendering (v1.5, `docs/v1.5-text-objects.md`)
+- [x] Per-template print-area DPI guidance and low-resolution warnings (v1.4)
+- [x] RTL/Arabic text + wrap-in-box (v1.6, `docs/v1.6-text-rtl-wrap.md`)
 
 ### Production (later)
 - Auth + ownership of designs

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Rect, type FabricObject } from 'fabric';
+import { Canvas, FabricImage, IText, Rect, Textbox, type FabricObject } from 'fabric';
 import {
   evaluateObjectQuality,
   FONT_SIZE_MAX,
@@ -10,6 +10,8 @@ import {
   FONT_WHITELIST,
   fontDefinitionOf,
   printAreaPpi,
+  resolveTextDirection,
+  TEXT_MAX_LINES,
   validateDesignPlacements,
   type DesignObject,
   type DesignPlacement,
@@ -18,6 +20,7 @@ import {
   type PrintQualityLevel,
   type ProductTemplateDto,
   type TextAlign,
+  type TextDirection,
 } from '@foloprint/shared';
 import {
   ApiError,
@@ -76,9 +79,16 @@ type DesignedObject = FabricObject & {
   assetId?: string;
   printAreaKey?: string;
   fontKey?: string;
+  /** Contract direction value ('auto' | 'ltr' | 'rtl'); Fabric's own `direction` holds the resolved one. */
+  textDirection?: TextDirection;
 };
 
-type DesignedText = IText & DesignedObject;
+/** IText for plain text, Textbox when wrap-in-box is on (same prop surface). */
+type DesignedText = (IText | Textbox) & DesignedObject;
+
+/** Visual line count: Fabric's textLines includes soft wraps for Textbox. */
+const visualLineCountOf = (t: DesignedText): number =>
+  t instanceof Textbox ? t.textLines.length : (t.text ?? '').split('\n').length;
 
 interface Status {
   tone: 'idle' | 'info' | 'error' | 'success';
@@ -96,7 +106,20 @@ interface SelectionReadout {
   /** Advisory print quality; null for text objects (vector-like) and unknown sources. */
   quality: { effectiveDpi: number; level: PrintQualityLevel } | null;
   /** Text styling, present when kind === 'text'. */
-  text: { fontKey: string; color: string; fontSize: number; align: TextAlign } | null;
+  text: {
+    fontKey: string;
+    color: string;
+    fontSize: number;
+    align: TextAlign;
+    /** Contract direction value; 'auto' resolves live via resolvedDirection. */
+    direction: TextDirection;
+    /** What 'auto' (or the explicit value) resolves to right now. */
+    resolvedDirection: 'ltr' | 'rtl';
+    /** True when the object is a wrap-in-box Textbox. */
+    wrap: boolean;
+    /** Current visual line count (soft wraps included for Textbox). */
+    lineCount: number;
+  } | null;
 }
 
 /** One short phrase per quality level; advisory voice, never a hard stop. */
@@ -253,19 +276,20 @@ export function EditorClient({
       }
       // DPI is image-only: text is vector-like and rerenders sharp at any size.
       const quality = designed.kind === 'image' ? qualityOf(designed) : null;
+      const t = designed as DesignedText;
       const text =
         designed.kind === 'text'
           ? {
               fontKey: designed.fontKey ?? TEXT_DEFAULTS.fontKey,
-              color:
-                typeof (designed as DesignedText).fill === 'string'
-                  ? ((designed as DesignedText).fill as string)
-                  : TEXT_DEFAULTS.color,
+              color: typeof t.fill === 'string' ? (t.fill as string) : TEXT_DEFAULTS.color,
               fontSize: Math.round(
-                ((designed as DesignedText).fontSize ?? TEXT_DEFAULTS.fontSize) *
-                  (designed.scaleY ?? 1),
+                (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (designed.scaleY ?? 1),
               ),
-              align: ((designed as DesignedText).textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+              align: (t.textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+              direction: designed.textDirection ?? 'auto',
+              resolvedDirection: resolveTextDirection(t.text ?? '', designed.textDirection ?? 'auto'),
+              wrap: t instanceof Textbox,
+              lineCount: visualLineCountOf(t),
             }
           : null;
       setSelection({
@@ -314,28 +338,61 @@ export function EditorClient({
     }
   }, []);
 
-  /** Builds a tagged IText with the editor's interaction rules (uniform scaling only). */
+  /**
+   * Builds a tagged IText (plain) or Textbox (wrap-in-box) with the editor's
+   * interaction rules. Fabric's `direction` always carries the RESOLVED direction;
+   * the contract value (possibly 'auto') lives on the textDirection tag.
+   */
   const makeDesignedText = useCallback(
     (
       content: string,
       areaKey: string,
-      props: { fontKey: string; fontSize: number; color: string; align: TextAlign },
+      props: {
+        fontKey: string;
+        fontSize: number;
+        color: string;
+        align: TextAlign;
+        direction?: TextDirection;
+        wrap?: boolean;
+        /** Wrap box width; Textbox only. */
+        width?: number;
+      },
     ): DesignedText => {
       const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
-      const itext = new IText(content, {
+      const direction = props.direction ?? 'auto';
+      const common = {
         fontFamily: definition.family,
         fontSize: props.fontSize,
         fill: props.color,
         textAlign: props.align,
-        originX: 'center',
-        originY: 'center',
-      }) as DesignedText;
-      // Corner handles only: non-uniform stretching would decouple the visual size
-      // from fontSize and break the save-time bake (fontSize * scale).
-      itext.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
+        originX: 'center' as const,
+        originY: 'center' as const,
+        direction: resolveTextDirection(content, direction),
+        // Fabric's default strokeWidth (1) inflates getScaledWidth() by 1px even with
+        // no stroke. For a Textbox that 1px becomes a wider wrap box on every
+        // save/reopen cycle and can flip a boundary-tight line break. Text never
+        // strokes here, so measure exactly.
+        strokeWidth: 0,
+      };
+      const itext = (
+        props.wrap
+          ? new Textbox(content, { ...common, width: props.width ?? 240 })
+          : new IText(content, common)
+      ) as DesignedText;
+      if (props.wrap) {
+        // Side middle handles change the Textbox wrap width without scaling glyphs
+        // (exactly the controlled reflow we want); top/bottom stay hidden because
+        // the height is derived from the wrapped lines.
+        itext.setControlsVisibility({ ml: true, mr: true, mt: false, mb: false });
+      } else {
+        // Corner handles only: non-uniform stretching would decouple the visual size
+        // from fontSize and break the save-time bake (fontSize * scale).
+        itext.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
+      }
       itext.kind = 'text';
       itext.fontKey = definition.key;
       itext.printAreaKey = areaKey;
+      itext.textDirection = direction;
       return itext;
     },
     [],
@@ -443,11 +500,17 @@ export function EditorClient({
           .catch(() => undefined) // degraded measurement beats losing the object
           .then(() => {
             if (disposed) return;
+            const isBox = saved.wrapMode === 'box';
             const itext = makeDesignedText(saved.text, areaKey, {
               fontKey: saved.fontFamily,
               fontSize: saved.fontSize,
               color: saved.color,
               align: saved.align,
+              direction: saved.direction ?? 'auto',
+              wrap: isBox,
+              // The stored width IS the wrap box width; the Textbox re-wraps live
+              // with its own engine and regenerates wrappedLines on the next save.
+              width: isBox ? saved.width : undefined,
             });
             const mine = areaKey === activeAreaKeyRef.current;
             itext.set({
@@ -458,9 +521,11 @@ export function EditorClient({
               evented: mine,
               selectable: mine,
             });
-            // Faithful geometry: scale the measured natural box to the stored box, so
-            // validation sees exactly the saved rectangle even if metrics drifted.
-            if (itext.width && itext.height) {
+            // Faithful geometry for plain text: scale the measured natural box to the
+            // stored box, so validation sees exactly the saved rectangle even if
+            // metrics drifted. A Textbox already has the exact stored width and a
+            // self-consistent re-wrapped height; scaling it would change the wrap.
+            if (!isBox && itext.width && itext.height) {
               itext.set({ scaleX: saved.width / itext.width, scaleY: saved.height / itext.height });
             }
             itext.setCoords();
@@ -505,6 +570,18 @@ export function EditorClient({
       }
       setDirty(true);
     };
+    // Live during typing: re-resolve 'auto' direction (first strong character may
+    // have changed) and refresh the readout so the overflow warning tracks the
+    // current wrapped line count. No re-fit here; that would fight the caret.
+    const onTextChanged = (e: { target?: FabricObject }) => {
+      const target = e.target as DesignedText | undefined;
+      if (!target || (target as DesignedObject).kind !== 'text') return;
+      if ((target.textDirection ?? 'auto') === 'auto') {
+        const resolved = resolveTextDirection(target.text ?? '');
+        if (target.direction !== resolved) target.set({ direction: resolved });
+      }
+      readSelection(target);
+    };
 
     canvas.on('object:moving', onMoving);
     canvas.on('object:modified', onModified);
@@ -512,6 +589,7 @@ export function EditorClient({
     canvas.on('selection:updated', onSelection);
     canvas.on('selection:cleared', onCleared);
     canvas.on('text:editing:exited', onTextEditingExited);
+    canvas.on('text:changed', onTextChanged);
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Delete' && event.key !== 'Backspace') return;
@@ -700,6 +778,59 @@ export function EditorClient({
     [clampTextScale, fitToPrintArea, readSelection],
   );
 
+  /** Sets the contract direction and re-resolves Fabric's rendered direction. */
+  const setTextDirection = useCallback(
+    (direction: TextDirection) =>
+      updateActiveText((t) => {
+        t.textDirection = direction;
+        t.set({ direction: resolveTextDirection(t.text ?? '', direction) });
+      }),
+    [updateActiveText],
+  );
+
+  /**
+   * Swaps the selected text between IText (plain) and Textbox (wrap-in-box),
+   * preserving text, font, size, color, align, direction, and center position.
+   * The current interactive scale is baked into the font size first so the
+   * replacement starts clean; the initial wrap width is the current measured
+   * width. Turning wrap off simply dissolves the soft wraps (raw text keeps
+   * only explicit breaks), no data loss in either direction.
+   */
+  const setTextWrap = useCallback(
+    (wrap: boolean) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'text') return;
+      const t = active as DesignedText;
+      if ((t instanceof Textbox) === wrap) return;
+
+      const bakedSize = Math.min(
+        Math.max((t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1), FONT_SIZE_MIN),
+        FONT_SIZE_MAX,
+      );
+      const replacement = makeDesignedText(t.text ?? '', t.printAreaKey ?? activeAreaKeyRef.current, {
+        fontKey: t.fontKey ?? TEXT_DEFAULTS.fontKey,
+        fontSize: bakedSize,
+        color: typeof t.fill === 'string' ? (t.fill as string) : TEXT_DEFAULTS.color,
+        align: (t.textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+        direction: t.textDirection ?? 'auto',
+        wrap,
+        width: wrap ? t.getScaledWidth() : undefined,
+      });
+      replacement.set({ left: t.left, top: t.top, angle: t.angle });
+      canvas.remove(t);
+      replacement.setCoords();
+      fitToPrintArea(replacement);
+      canvas.add(replacement);
+      canvas.setActiveObject(replacement);
+      canvas.requestRenderAll();
+      readSelection(replacement);
+      refreshAreaCounts();
+      setDirty(true);
+    },
+    [makeDesignedText, fitToPrintArea, readSelection, refreshAreaCounts],
+  );
+
   /**
    * Serializes ALL areas (visible and hidden) from the one canvas into v2 placements.
    * Normalized fields only; never raw Fabric JSON. Areas with no objects are omitted.
@@ -712,15 +843,23 @@ export function EditorClient({
       let serialized: DesignObject | null = null;
       if (obj.kind === 'text') {
         const t = obj as DesignedText;
+        const isBox = t instanceof Textbox;
         serialized = {
           type: 'text',
           text: (t.text ?? '').replace(/\r\n?/g, '\n'),
           fontFamily: t.fontKey ?? TEXT_DEFAULTS.fontKey,
           // Uniform corner scaling bakes into the font size; the object never
-          // persists a scale factor.
+          // persists a scale factor. For a Textbox the same bake applies to the
+          // wrap width via getScaledWidth() below.
           fontSize: (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1),
           color: typeof t.fill === 'string' ? t.fill : TEXT_DEFAULTS.color,
           align: (t.textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+          direction: t.textDirection ?? 'auto',
+          wrapMode: isBox ? 'box' : 'none',
+          // The exact visual lines Fabric produced (soft wraps + explicit breaks
+          // flattened); the server renders these verbatim and verifies they
+          // reconcile with the raw text. Regenerated on every save, never edited.
+          ...(isBox ? { wrappedLines: [...t.textLines] } : {}),
           x: t.left ?? 0,
           y: t.top ?? 0,
           width: t.getScaledWidth(),
@@ -781,6 +920,19 @@ export function EditorClient({
     const placements = collectPlacements();
     if (placements.length === 0) {
       setStatus({ tone: 'error', message: 'Add at least one artwork or text before saving.' });
+      return;
+    }
+
+    // Clear reason before the round-trip: the server would reject the line count
+    // anyway, this just says why up front (mirrors the inline panel warning).
+    const overflowing = designedObjects().filter(
+      (obj) => obj.kind === 'text' && visualLineCountOf(obj as DesignedText) > TEXT_MAX_LINES,
+    );
+    if (overflowing.length > 0) {
+      setStatus({
+        tone: 'error',
+        message: `Text wraps to more than ${TEXT_MAX_LINES} lines. Shorten it or widen its box before saving.`,
+      });
       return;
     }
 
@@ -1075,6 +1227,51 @@ export function EditorClient({
                       ))}
                     </div>
                   </div>
+                  <div className="text-panel__field" role="group" aria-label="Text direction">
+                    Direction
+                    <div className="text-panel__align">
+                      {(['auto', 'ltr', 'rtl'] as const).map((dir) => (
+                        <button
+                          key={dir}
+                          type="button"
+                          data-testid={`text-direction-${dir}`}
+                          data-resolved={
+                            dir === 'auto' ? selection.text?.resolvedDirection : undefined
+                          }
+                          className={
+                            selection.text?.direction === dir
+                              ? 'btn btn--ghost btn--small btn--active'
+                              : 'btn btn--ghost btn--small'
+                          }
+                          onClick={() => setTextDirection(dir)}
+                        >
+                          {dir === 'auto' ? `auto (${selection.text?.resolvedDirection})` : dir}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="text-panel__field text-panel__wrap">
+                    <span>
+                      <input
+                        type="checkbox"
+                        data-testid="text-wrap-toggle"
+                        checked={selection.text.wrap}
+                        onChange={(e) => setTextWrap(e.target.checked)}
+                      />{' '}
+                      Wrap in box
+                    </span>
+                    <small>Side handles set the box width; text reflows inside it.</small>
+                  </label>
+                  {selection.text.lineCount > TEXT_MAX_LINES && (
+                    <p
+                      className="text-panel__warning"
+                      role="alert"
+                      data-testid="text-overflow-warning"
+                    >
+                      Text wraps to more than {TEXT_MAX_LINES} lines and cannot be saved.
+                      Shorten it or widen the box.
+                    </p>
+                  )}
                 </div>
               )}
               <button

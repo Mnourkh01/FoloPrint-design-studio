@@ -501,6 +501,23 @@ button {
   gap: 6px;
 }
 
+.text-panel__wrap small {
+  font-weight: 400;
+  color: var(--ink-soft);
+}
+
+/* Non-dismissable while true: mirrors the server's 8-line rule before the round-trip. */
+.text-panel__warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #cf3f22;
+  border-radius: 6px;
+  background: rgba(207, 63, 34, 0.08);
+  color: #a32f17;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .btn--active {
   background: var(--ink);
   color: var(--paper);

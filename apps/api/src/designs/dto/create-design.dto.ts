@@ -22,8 +22,13 @@ import {
   FONT_SIZE_MIN,
   HEX_COLOR_PATTERN,
   TEXT_ALIGNMENTS,
+  TEXT_DIRECTIONS,
   TEXT_MAX_LENGTH,
+  TEXT_MAX_LINES,
+  TEXT_WRAP_MODES,
   type TextAlign,
+  type TextDirection,
+  type TextWrapMode,
 } from '@foloprint/shared';
 
 const isText = (o: DesignObjectDto): boolean => o.type === 'text';
@@ -98,6 +103,31 @@ export class DesignObjectDto {
   @ValidateIf(isText)
   @IsIn(TEXT_ALIGNMENTS as readonly string[])
   align?: TextAlign;
+
+  /** Base direction; missing means 'auto'. Text objects only. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsIn(TEXT_DIRECTIONS as readonly string[])
+  direction?: TextDirection;
+
+  /** Wrap behavior; missing means 'none'. Text objects only. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsIn(TEXT_WRAP_MODES as readonly string[])
+  wrapMode?: TextWrapMode;
+
+  /**
+   * Editor-derived visual lines; required with wrapMode 'box', forbidden otherwise.
+   * Presence pairing, per-entry content, and reconciliation against `text` are
+   * enforced by the shared validation the service runs as the authority.
+   */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(TEXT_MAX_LINES)
+  @IsString({ each: true })
+  @Length(1, TEXT_MAX_LENGTH, { each: true })
+  wrappedLines?: string[];
 }
 
 /** All artwork for one print area. Placements with zero objects are rejected. */

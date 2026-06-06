@@ -102,6 +102,88 @@ const TOOL_LABELS: Record<StudioTool, string> = {
 
 const TOOL_ORDER: StudioTool[] = ['product', 'uploads', 'text', 'saved', 'layers'];
 
+/** Align actions for the Position tool: edge/center against the object's print area. */
+type AlignAction = 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom';
+
+const ALIGN_ACTIONS: { key: AlignAction; label: string; icon: React.ReactNode }[] = [
+  {
+    key: 'center-h',
+    label: 'Center horizontally',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+        <path d="M12 3v3.5m0 11V21" />
+        <rect x="6" y="8.5" width="12" height="7" rx="1.2" />
+      </svg>
+    ),
+  },
+  {
+    key: 'center-v',
+    label: 'Center vertically',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+        <path d="M3 12h3.5m11 0H21" />
+        <rect x="8.5" y="6" width="7" height="12" rx="1.2" />
+      </svg>
+    ),
+  },
+  {
+    key: 'left',
+    label: 'Align left',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+        <path d="M4 3v18" />
+        <rect x="7.5" y="8.5" width="11" height="7" rx="1.2" />
+      </svg>
+    ),
+  },
+  {
+    key: 'right',
+    label: 'Align right',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+        <path d="M20 3v18" />
+        <rect x="5.5" y="8.5" width="11" height="7" rx="1.2" />
+      </svg>
+    ),
+  },
+  {
+    key: 'top',
+    label: 'Align top',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+        <path d="M3 4h18" />
+        <rect x="8.5" y="7.5" width="7" height="11" rx="1.2" />
+      </svg>
+    ),
+  },
+  {
+    key: 'bottom',
+    label: 'Align bottom',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+        <path d="M3 20h18" />
+        <rect x="8.5" y="5.5" width="7" height="11" rx="1.2" />
+      </svg>
+    ),
+  },
+];
+
+/** Icons for the contextual object toolbar above the stage. */
+const CONTEXT_TOOL_ICONS = {
+  transform: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M20 11a8 8 0 1 0 .9 4.2" />
+      <path d="M20 4v7h-7" />
+    </svg>
+  ),
+  position: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path d="M12 8v8M8 12h8" />
+    </svg>
+  ),
+};
+
 /**
  * Polished selection chrome shared by every design object: branded border,
  * round white grab handles. Pure cosmetics; geometry math is untouched.
@@ -189,6 +271,8 @@ interface SelectionReadout {
   rotation: number;
   /** Advisory print quality; null for text objects (vector-like) and unknown sources. */
   quality: { effectiveDpi: number; level: PrintQualityLevel } | null;
+  /** Physical print size in inches (image only); null when the area has no usable ppi. */
+  physical: { widthIn: number; heightIn: number } | null;
   /** Text styling, present when kind === 'text'. */
   text: {
     fontKey: string;
@@ -267,6 +351,9 @@ export function EditorClient({
 
   /** View zoom multiplier over the fit zoom (1 = product fits the stage). */
   const [viewZoom, setViewZoom] = useState(1);
+
+  /** Open contextual object tool (toolbar above the stage); null = toolbar only. */
+  const [objectTool, setObjectTool] = useState<'transform' | 'position' | null>(null);
 
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
@@ -375,6 +462,16 @@ export function EditorClient({
       }
       // DPI is image-only: text is vector-like and rerenders sharp at any size.
       const quality = designed.kind === 'image' ? qualityOf(designed) : null;
+      // Physical print size mirrors the layer card in commercial editors: how big
+      // this artwork will actually print, in inches, on its own print area.
+      const ppi = ppiByKey.get(designed.printAreaKey ?? activeAreaKeyRef.current) ?? null;
+      const physical =
+        designed.kind === 'image' && ppi
+          ? {
+              widthIn: Math.round((designed.getScaledWidth() / ppi.x) * 10) / 10,
+              heightIn: Math.round((designed.getScaledHeight() / ppi.y) * 10) / 10,
+            }
+          : null;
       const t = designed as DesignedText;
       const text =
         designed.kind === 'text'
@@ -401,10 +498,11 @@ export function EditorClient({
         quality: quality
           ? { effectiveDpi: Math.round(quality.effectiveDpi), level: quality.level }
           : null,
+        physical,
         text,
       });
     },
-    [qualityOf],
+    [qualityOf, ppiByKey],
   );
 
   const removeActiveObject = useCallback(() => {
@@ -906,6 +1004,68 @@ export function EditorClient({
     [clampTextScale, fitToPrintArea, readSelection],
   );
 
+  /** The contextual tool follows the selection; no selection, no tool panel. */
+  useEffect(() => {
+    if (!selection) setObjectTool(null);
+  }, [selection]);
+
+  /**
+   * Applies a geometry change to the selected object (any kind), then re-fits it
+   * to its print area and refreshes the readout. The object-tools counterpart of
+   * updateActiveText.
+   */
+  const updateActiveObject = useCallback(
+    (mutate: (obj: DesignedObject) => void) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || !active?.kind) return;
+      mutate(active);
+      active.setCoords();
+      clampTextScale(active);
+      fitToPrintArea(active);
+      canvas.requestRenderAll();
+      readSelection(active);
+      setDirty(true);
+    },
+    [clampTextScale, fitToPrintArea, readSelection],
+  );
+
+  /**
+   * Sets the absolute rotation (degrees, normalized to [0, 360)). Designed objects
+   * have a center origin, so the angle change pivots around the object center; the
+   * follow-up fit shrinks the object if the rotated box no longer fits its area.
+   */
+  const setActiveAngle = useCallback(
+    (angle: number) => {
+      if (!Number.isFinite(angle)) return;
+      updateActiveObject((obj) => obj.set({ angle: ((angle % 360) + 360) % 360 }));
+    },
+    [updateActiveObject],
+  );
+
+  /**
+   * Aligns the selected object's axis-aligned bounding box against its OWN print
+   * area (works for rotated objects too; the box is what clamping validates).
+   */
+  const alignActiveObject = useCallback(
+    (action: AlignAction) =>
+      updateActiveObject((obj) => {
+        const area = areaOf(obj);
+        if (!area) return;
+        const box = obj.getBoundingRect();
+        let dx = 0;
+        let dy = 0;
+        if (action === 'left') dx = area.x - box.left;
+        if (action === 'center-h') dx = area.x + (area.width - box.width) / 2 - box.left;
+        if (action === 'right') dx = area.x + area.width - (box.left + box.width);
+        if (action === 'top') dy = area.y - box.top;
+        if (action === 'center-v') dy = area.y + (area.height - box.height) / 2 - box.top;
+        if (action === 'bottom') dy = area.y + area.height - (box.top + box.height);
+        obj.set({ left: (obj.left ?? 0) + dx, top: (obj.top ?? 0) + dy });
+      }),
+    [updateActiveObject, areaOf],
+  );
+
   /** Sets the contract direction and re-resolves Fabric's rendered direction. */
   const setTextDirection = useCallback(
     (direction: TextDirection) =>
@@ -1163,6 +1323,8 @@ export function EditorClient({
   const totalObjects = Object.values(areaCounts).reduce((sum, n) => sum + n, 0);
   const placedAreas = Object.keys(areaCounts).length;
   const zoomPercent = Math.round(zoom * viewZoom * 100);
+  /** Rotation normalized to [0, 359] for the Transform tool inputs. */
+  const selectionAngle = selection ? ((selection.rotation % 360) + 360) % 360 : 0;
   const layerObjects = designedObjects().filter((o) => o.printAreaKey === activeAreaKey);
   const activeCanvasObject = canvasRef.current?.getActiveObject() ?? null;
 
@@ -1197,6 +1359,11 @@ export function EditorClient({
           >
             print <b>~{selection.quality.effectiveDpi} DPI</b>,{' '}
             {QUALITY_COPY[selection.quality.level]}
+          </span>
+        )}
+        {selection.physical && (
+          <span data-testid="physical-size-readout">
+            prints at <b>{selection.physical.widthIn} x {selection.physical.heightIn} in</b>
           </span>
         )}
       </div>
@@ -1593,6 +1760,84 @@ export function EditorClient({
         </aside>
 
         <section className="studio__stage" aria-label="Design workspace">
+          {selection && (
+            <div
+              className="studio__context-bar"
+              role="toolbar"
+              aria-label="Object tools"
+              data-testid="context-toolbar"
+            >
+              {(['transform', 'position'] as const).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  data-testid={`context-tool-${key}`}
+                  aria-pressed={objectTool === key}
+                  className={
+                    objectTool === key
+                      ? 'studio__context-tool studio__context-tool--active'
+                      : 'studio__context-tool'
+                  }
+                  onClick={() => setObjectTool((open) => (open === key ? null : key))}
+                >
+                  {CONTEXT_TOOL_ICONS[key]}
+                  <span>{key === 'transform' ? 'Transform' : 'Position'}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {selection && objectTool === 'transform' && (
+            <div className="studio__object-panel" data-testid="object-panel-transform">
+              <p className="studio__object-panel-title">Rotate</p>
+              <div className="studio__rotate-row">
+                <input
+                  type="range"
+                  min={0}
+                  max={359}
+                  step={1}
+                  value={selectionAngle}
+                  data-testid="rotate-slider"
+                  aria-label="Rotation in degrees"
+                  onChange={(e) => setActiveAngle(Number(e.target.value))}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={359}
+                  value={selectionAngle}
+                  data-testid="rotate-input"
+                  aria-label="Rotation in degrees"
+                  onChange={(e) => {
+                    const angle = Number(e.target.value);
+                    if (Number.isFinite(angle)) setActiveAngle(angle);
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          {selection && objectTool === 'position' && (
+            <div className="studio__object-panel" data-testid="object-panel-position">
+              <p className="studio__object-panel-title">Align to print area</p>
+              <div className="studio__align-row" role="group" aria-label="Align object">
+                {ALIGN_ACTIONS.map((action) => (
+                  <button
+                    key={action.key}
+                    type="button"
+                    className="studio__align-btn"
+                    data-testid={`align-${action.key}`}
+                    title={action.label}
+                    aria-label={action.label}
+                    onClick={() => alignActiveObject(action.key)}
+                  >
+                    {action.icon}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div
             className="studio__canvas-wrap"
             style={{ width: STAGE_WIDTH, height: stageHeight }}

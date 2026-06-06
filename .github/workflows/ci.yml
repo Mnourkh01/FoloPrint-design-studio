@@ -69,6 +69,14 @@ jobs:
       - name: Build packages
         run: npm run build:packages
 
+      # Type gates: jest/next dev tolerate type drift; these fail the merge on any
+      # type error in the API or the web app.
+      - name: Build API (type gate)
+        run: npm run build -w @foloprint/api
+
+      - name: Typecheck web
+        run: npx tsc --noEmit -p apps/web/tsconfig.json
+
       - name: Run shared tests
         run: npm run test:shared
 

@@ -33,8 +33,13 @@ export interface RenderImageObject extends RenderObjectGeometry {
 
 export interface RenderTextObject extends RenderObjectGeometry {
   type: 'text';
-  /** Plain text; `\n` for explicit line breaks. Never interpreted as markup. */
-  text: string;
+  /**
+   * Final visual lines, in order: the caller maps `wrappedLines` for box-wrapped
+   * text or `text.split('\n')` otherwise. The renderer renders them verbatim
+   * (joined with `\n`, Pango wrap never used), so line breaks always match the
+   * editor's. Never interpreted as markup.
+   */
+  lines: string[];
   /** Whitelist font key (resolved to a bundled file by the renderer). */
   fontFamily: string;
   /** Font size in canvas px. */
@@ -42,6 +47,12 @@ export interface RenderTextObject extends RenderObjectGeometry {
   /** #RRGGBB. */
   color: string;
   align: TextAlign;
+  /**
+   * Resolved base direction ('auto' already resolved by the caller via the shared
+   * resolveTextDirection; the renderer never guesses). Forced per line with a
+   * zero-width directional mark, because sharp exposes no Pango direction option.
+   */
+  direction: 'ltr' | 'rtl';
 }
 
 export type RenderObject = RenderImageObject | RenderTextObject;
@@ -77,6 +88,26 @@ const PANGO_ALIGN: Record<TextAlign, 'left' | 'centre' | 'right'> = {
   center: 'centre',
   right: 'right',
 };
+
+/**
+ * Pango interprets left/right alignment relative to the paragraph direction (its
+ * 'left' means line-start, which is the RIGHT edge of an RTL paragraph), while the
+ * contract's `align` always means visual left/right (canvas semantics). Pinned by
+ * the rtl-alignment renderer test; for resolved-RTL text the values swap.
+ */
+const PANGO_ALIGN_RTL: Record<TextAlign, 'left' | 'centre' | 'right'> = {
+  left: 'right',
+  center: 'centre',
+  right: 'left',
+};
+
+/**
+ * Zero-width directional marks (LRM U+200E / RLM U+200F) injected at render time
+ * only, never stored: Pango picks base direction per paragraph from its first
+ * strong character, and the mark is that character. Stored text rejects all bidi
+ * controls, so user content can never carry its own.
+ */
+const DIRECTION_MARK = { ltr: '\u200E', rtl: '\u200F' } as const;
 
 /**
  * Rotate a prepared layer around its center on a transparent background and compute
@@ -136,14 +167,22 @@ async function prepareImageLayer(obj: RenderImageObject): Promise<PreparedLayer>
 async function prepareTextLayer(obj: RenderTextObject): Promise<PreparedLayer> {
   const font = resolveFont(obj.fontFamily); // throws UnknownFontError on non-whitelist keys
 
+  // Each line gets the resolved direction mark so every Pango paragraph shares the
+  // object's base direction (a line starting with an opposite-direction strong char
+  // would otherwise flip on the server but not in the editor). Wrap is never used:
+  // the lines were finalized by the editor.
+  const mark = DIRECTION_MARK[obj.direction];
+  const pangoText = obj.lines.map((line) => mark + line).join('\n');
+  const align = obj.direction === 'rtl' ? PANGO_ALIGN_RTL[obj.align] : PANGO_ALIGN[obj.align];
+
   const raster = await sharp({
     text: {
-      text: obj.text,
+      text: pangoText,
       font: `${font.family} ${obj.fontSize}`,
       fontfile: font.filePath,
       rgba: true,
       dpi: TEXT_DPI,
-      align: PANGO_ALIGN[obj.align],
+      align,
     },
   })
     .png()
@@ -181,8 +220,16 @@ function assertRenderableObject(obj: RenderObject, index: number, printArea: Rec
     throw new RenderValidationError(`Design object ${index} is outside the print area`);
   }
   if (obj.type === 'text') {
-    if (typeof obj.text !== 'string' || obj.text.trim().length === 0) {
+    if (
+      !Array.isArray(obj.lines) ||
+      obj.lines.length === 0 ||
+      obj.lines.some((line) => typeof line !== 'string' || line.includes('\n')) ||
+      obj.lines.join('').trim().length === 0
+    ) {
       throw new RenderValidationError(`Design object ${index} has empty text`);
+    }
+    if (obj.direction !== 'ltr' && obj.direction !== 'rtl') {
+      throw new RenderValidationError(`Design object ${index} has an unresolved direction`);
     }
     if (!HEX_COLOR_PATTERN.test(obj.color)) {
       throw new RenderValidationError(`Design object ${index} has an invalid color`);

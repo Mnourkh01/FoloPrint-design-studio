@@ -41,6 +41,12 @@ export interface ImageDesignObject extends DesignObjectBase {
 
 export type TextAlign = 'left' | 'center' | 'right';
 
+/** Base text direction. 'auto' = first strong character decides (resolveTextDirection). */
+export type TextDirection = 'ltr' | 'rtl' | 'auto';
+
+/** 'box' = auto-wrap at the stored width (editor Textbox); 'none' = explicit `\n` only. */
+export type TextWrapMode = 'none' | 'box';
+
 /**
  * One placed text element inside a print area. Vector-like: no source bitmap,
  * so it never participates in DPI quality math.
@@ -61,6 +67,19 @@ export interface TextDesignObject extends DesignObjectBase {
   /** Strict #RRGGBB. No alpha, no named colors, no CSS functions. */
   color: string;
   align: TextAlign;
+  /** Base direction. Missing normalizes to 'auto' (pre-v1.6 objects). */
+  direction?: TextDirection;
+  /** Wrap behavior. Missing normalizes to 'none' (pre-v1.6 objects). */
+  wrapMode?: TextWrapMode;
+  /**
+   * Derived render cache, REQUIRED when wrapMode === 'box', FORBIDDEN otherwise.
+   * The exact visual lines the editor produced at save time (soft wraps + explicit
+   * breaks flattened, in order). The server renders these verbatim so the mockup
+   * breaks exactly where the editor broke; it verifies them against raw `text`
+   * (whitespace-stripped reconciliation) so the cache cannot be forged. Never
+   * edited, only regenerated on save.
+   */
+  wrappedLines?: string[];
 }
 
 /**

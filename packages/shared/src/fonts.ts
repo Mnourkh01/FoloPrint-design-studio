@@ -28,6 +28,12 @@ export const FONT_WHITELIST = [
   { key: 'playfair', family: 'Playfair Display', fileName: 'playfair.ttf', license: 'OFL-1.1' },
   { key: 'roboto-slab', family: 'Roboto Slab', fileName: 'roboto-slab.ttf', license: 'Apache-2.0' },
   { key: 'caveat', family: 'Caveat', fileName: 'caveat.ttf', license: 'OFL-1.1' },
+  {
+    key: 'noto-naskh-arabic',
+    family: 'Noto Naskh Arabic',
+    fileName: 'noto-naskh-arabic.ttf',
+    license: 'OFL-1.1',
+  },
 ] as const satisfies readonly FontDefinition[];
 
 /** Union of valid whitelist keys ("inter" | "oswald" | ...). */

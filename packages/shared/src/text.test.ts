@@ -4,6 +4,7 @@ import {
   designObjectContentErrors,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
+  resolveTextDirection,
   TEXT_MAX_LENGTH,
   TEXT_MAX_LINES,
 } from './text';
@@ -28,13 +29,14 @@ const errorsOf = (overrides: Partial<TextDesignObject>): string[] =>
   designObjectContentErrors(validText(overrides));
 
 describe('font whitelist', () => {
-  it('contains the five bundled fonts with license metadata', () => {
+  it('contains the six bundled fonts with license metadata', () => {
     expect(FONT_WHITELIST.map((f) => f.key)).toEqual([
       'inter',
       'oswald',
       'playfair',
       'roboto-slab',
       'caveat',
+      'noto-naskh-arabic',
     ]);
     for (const font of FONT_WHITELIST) {
       expect(['OFL-1.1', 'Apache-2.0']).toContain(font.license);
@@ -115,6 +117,125 @@ describe('designObjectContentErrors for text objects', () => {
     expect(errorsOf({ align: 'justify' as TextDesignObject['align'] })).toContainEqual(
       expect.stringMatching(/left, center, right/),
     );
+  });
+
+  it('accepts valid direction and wrapMode values, including absent ones', () => {
+    expect(errorsOf({})).toEqual([]); // both absent (pre-v1.6 object)
+    expect(errorsOf({ direction: 'ltr' })).toEqual([]);
+    expect(errorsOf({ direction: 'rtl' })).toEqual([]);
+    expect(errorsOf({ direction: 'auto' })).toEqual([]);
+    expect(errorsOf({ wrapMode: 'none' })).toEqual([]);
+    expect(
+      errorsOf({ wrapMode: 'box', text: 'Hello world', wrappedLines: ['Hello', 'world'] }),
+    ).toEqual([]);
+  });
+
+  it('rejects unknown direction and wrapMode values', () => {
+    expect(errorsOf({ direction: 'up' as TextDesignObject['direction'] })).toContainEqual(
+      expect.stringMatching(/ltr, rtl, auto/),
+    );
+    expect(errorsOf({ wrapMode: 'char' as TextDesignObject['wrapMode'] })).toContainEqual(
+      expect.stringMatching(/none, box/),
+    );
+  });
+
+  it('rejects bidi control characters in text', () => {
+    for (const char of ['؜', '‎', '‏', '‪', '‮', '⁦', '⁩']) {
+      expect(errorsOf({ text: `bad${char}text` })).toContainEqual(
+        expect.stringMatching(/bidirectional control/),
+      );
+    }
+  });
+
+  it('requires wrappedLines exactly when wrapMode is box', () => {
+    expect(errorsOf({ wrapMode: 'box' })).toContainEqual(
+      expect.stringMatching(/wrappedLines is required/),
+    );
+    expect(errorsOf({ wrapMode: 'box', wrappedLines: [] })).toContainEqual(
+      expect.stringMatching(/wrappedLines is required/),
+    );
+    expect(errorsOf({ wrappedLines: ['Hello world'] })).toContainEqual(
+      expect.stringMatching(/only allowed when wrapMode/),
+    );
+    expect(errorsOf({ wrapMode: 'none', wrappedLines: ['Hello world'] })).toContainEqual(
+      expect.stringMatching(/only allowed when wrapMode/),
+    );
+  });
+
+  it('rejects wrappedLines content violations', () => {
+    const box = (lines: unknown): string[] =>
+      errorsOf({ wrapMode: 'box', text: 'Hello world', wrappedLines: lines as string[] });
+    expect(box(['Hello\nworld'])).toContainEqual(expect.stringMatching(/must not contain line breaks/));
+    expect(box(['Hello\rworld'])).toContainEqual(expect.stringMatching(/control characters/));
+    expect(box(['Hello‏world'])).toContainEqual(expect.stringMatching(/bidirectional control/));
+    expect(box(['Hello', 42])).toContainEqual(expect.stringMatching(/must be strings/));
+  });
+
+  it('caps the visual line count: wrappedLines.length in box mode', () => {
+    const words = Array(TEXT_MAX_LINES + 1).fill('x');
+    expect(
+      errorsOf({ wrapMode: 'box', text: words.join(' '), wrappedLines: words }),
+    ).toContainEqual(expect.stringMatching(/at most 8 lines/));
+    // At exactly the cap it passes.
+    const atCap = Array(TEXT_MAX_LINES).fill('x');
+    expect(
+      errorsOf({ wrapMode: 'box', text: atCap.join(' '), wrappedLines: atCap }),
+    ).toEqual([]);
+  });
+
+  it('rejects forged or stale wrappedLines via reconciliation', () => {
+    expect(
+      errorsOf({ wrapMode: 'box', text: 'Hello world', wrappedLines: ['Goodbye', 'world'] }),
+    ).toContainEqual(expect.stringMatching(/does not reconcile/));
+    expect(
+      errorsOf({ wrapMode: 'box', text: 'Hello world', wrappedLines: ['Hello'] }),
+    ).toContainEqual(expect.stringMatching(/does not reconcile/));
+    // Whitespace moves are exactly what wrapping does; they must reconcile.
+    expect(
+      errorsOf({ wrapMode: 'box', text: 'a b c d', wrappedLines: ['a b', 'c d'] }),
+    ).toEqual([]);
+    // Explicit breaks flattened into visual lines reconcile too.
+    expect(
+      errorsOf({ wrapMode: 'box', text: 'a b\nc d', wrappedLines: ['a b', 'c d'] }),
+    ).toEqual([]);
+  });
+});
+
+describe('resolveTextDirection', () => {
+  it('explicit direction short-circuits', () => {
+    expect(resolveTextDirection('hello', 'rtl')).toBe('rtl');
+    expect(resolveTextDirection('مرحبا', 'ltr')).toBe('ltr');
+  });
+
+  it('auto resolves rtl on Arabic-first text', () => {
+    expect(resolveTextDirection('مرحبا بالعالم')).toBe('rtl');
+    expect(resolveTextDirection('مرحبا ABC')).toBe('rtl');
+  });
+
+  it('auto resolves ltr on Latin-first text', () => {
+    expect(resolveTextDirection('Hello')).toBe('ltr');
+    expect(resolveTextDirection('ABC مرحبا')).toBe('ltr');
+  });
+
+  it('skips neutral characters before the first strong one', () => {
+    expect(resolveTextDirection('123 ?! مرحبا')).toBe('rtl');
+    expect(resolveTextDirection('123 ?! abc')).toBe('ltr');
+  });
+
+  it('all-neutral text defaults to ltr', () => {
+    expect(resolveTextDirection('123 ?!')).toBe('ltr');
+    expect(resolveTextDirection('')).toBe('ltr');
+  });
+
+  it('detects Hebrew and Arabic presentation forms as rtl', () => {
+    expect(resolveTextDirection('שלום')).toBe('rtl');
+    expect(resolveTextDirection('ﭐ')).toBe('rtl'); // presentation forms A
+    expect(resolveTextDirection('ﹰ')).toBe('rtl'); // presentation forms B
+  });
+
+  it('auto defaults when the argument is omitted or auto', () => {
+    expect(resolveTextDirection('مرحبا', 'auto')).toBe('rtl');
+    expect(resolveTextDirection('hello', 'auto')).toBe('ltr');
   });
 });
 

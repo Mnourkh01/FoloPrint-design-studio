@@ -44,6 +44,14 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   shared whitelist (`packages/shared/src/fonts.ts`); binaries live in
   `packages/renderer/fonts/<key>/` (OFL/Apache only, license file checked in) and only the
   renderer touches them (`resolveFont`).
+- Text direction/wrap (v1.6): optional `direction` ('ltr'|'rtl'|'auto', default auto via
+  shared `resolveTextDirection` first-strong scan) and `wrapMode` ('none'|'box').
+  `wrappedLines` is a derived cache, required iff wrapMode is 'box'; the editor is the
+  only wrap engine, the server renders the lines verbatim after verifying they reconcile
+  with raw `text` (whitespace-stripped). Direction is forced at render time with
+  zero-width LRM/RLM marks per line, never stored; stored text rejects all bidi control
+  characters. Pango flips left/right align for RTL, so the renderer swaps them to keep
+  `align` visual.
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

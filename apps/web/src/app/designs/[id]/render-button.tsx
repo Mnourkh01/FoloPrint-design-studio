@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ApiError, renderDesign } from '@/lib/api';
 
-export function RenderButton({ designId, hasPreview }: { designId: string; hasPreview: boolean }) {
+export function RenderButton({ designId, hasPreviews }: { designId: string; hasPreviews: boolean }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +32,7 @@ export function RenderButton({ designId, hasPreview }: { designId: string; hasPr
         disabled={busy}
         onClick={() => void run()}
       >
-        {busy ? 'Rendering...' : hasPreview ? 'Render again' : 'Generate mockup'}
+        {busy ? 'Rendering...' : hasPreviews ? 'Render again' : 'Generate mockups'}
       </button>
       {error && (
         <p className="status status--error" style={{ marginTop: 10 }}>

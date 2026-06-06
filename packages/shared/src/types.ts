@@ -34,13 +34,32 @@ export interface DesignObject {
   rotation: number;
 }
 
-/** The persisted design document (DesignProject.designJson). */
+/** All artwork placed on one print area. A placement exists only if it has objects. */
+export interface DesignPlacement {
+  printAreaKey: string;
+  objects: DesignObject[];
+}
+
+/**
+ * The persisted design document, current version (DesignProject.designJson).
+ * One document covers every print area of the template the user placed artwork on.
+ */
 export interface DesignDocument {
+  version: 2;
+  templateId: string;
+  placements: DesignPlacement[];
+}
+
+/** Legacy single-area document (v1.1 and earlier). Normalized to v2 at read time. */
+export interface DesignDocumentV1 {
   version: 1;
   templateId: string;
   printAreaKey: string;
   objects: DesignObject[];
 }
+
+/** Any document shape that may come out of the database. */
+export type AnyDesignDocument = DesignDocumentV1 | DesignDocument;
 
 // ---------------------------------------------------------------------------
 // API response shapes (what the web app consumes; never contains fs paths)
@@ -54,6 +73,13 @@ export interface PrintAreaDto {
   y: number;
   width: number;
   height: number;
+  /**
+   * Relative API URL streaming this area's own base image, or null when the area
+   * falls back to the template-level image.
+   */
+  imageUrl: string | null;
+  /** Same fallback rule for the area's overlay image. */
+  overlayUrl: string | null;
 }
 
 export interface ProductTemplateDto {
@@ -80,18 +106,28 @@ export interface UploadedAssetDto {
   url: string;
 }
 
+/** Metadata for one rendered area preview. */
+export interface DesignPreviewDto {
+  printAreaKey: string;
+  /** Relative API URL streaming the preview PNG. */
+  previewUrl: string;
+  /** ISO timestamp of the render that produced this preview. */
+  renderedAt: string;
+}
+
 export interface DesignProjectDto {
   id: string;
   templateId: string;
   templateSlug: string;
+  /** Always normalized to the current document version (v2). */
   design: DesignDocument;
-  /** Relative API URL streaming the rendered preview, null until rendered. */
-  previewUrl: string | null;
+  /** One entry per rendered area; empty until the design is rendered. */
+  previews: DesignPreviewDto[];
   createdAt: string;
   updatedAt: string;
 }
 
 export interface RenderResultDto {
-  id: string;
-  previewUrl: string;
+  designId: string;
+  previews: DesignPreviewDto[];
 }

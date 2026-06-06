@@ -54,16 +54,22 @@ persisted or rendered.
 
 ## Phases
 
-### v1 (this slice) - exit criteria
-- [ ] Seeded sample t-shirt template with one front print area
-- [ ] Editor: load template, upload logo, move/resize/rotate inside visible print area boundary
-- [ ] Save design -> server-side validation -> persisted design JSON
-- [ ] Generate mockup -> Sharp composition -> preview displayed in browser
-- [ ] All test suites pass; Playwright smoke green
+### v1 (shipped) - exit criteria
+- [x] Seeded sample t-shirt template with one front print area
+- [x] Editor: load template, upload logo, move/resize/rotate inside visible print area boundary
+- [x] Save design -> server-side validation -> persisted design JSON
+- [x] Generate mockup -> Sharp composition -> preview displayed in browser
+- [x] All test suites pass; Playwright smoke green
+
+### v1.2 (shipped) - multi print areas
+- [x] Front + back print areas with own view images (template-level fallback)
+- [x] Editor area switcher; one design covers both areas; per-area validation
+- [x] Design document v2 (placements); v1 docs normalized at read, upgraded on save
+- [x] One rendered preview per placed area (`/designs/:id/preview/:areaKey`)
+- [x] Design re-open and edit restores every area
+- See `docs/v1.2-multi-print-areas.md` for the technical plan
 
 ### Stable (next slice)
-- Multiple print areas (front/back) with area switcher
-- Design re-open and edit (load saved design back into editor)
 - Text objects with font rendering
 - Per-template print-area DPI guidance and low-resolution warnings
 

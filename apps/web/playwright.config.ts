@@ -23,14 +23,15 @@ export default defineConfig({
       command: 'npm run start:dev -w @foloprint/api',
       cwd: '../..',
       url: 'http://localhost:3001/health',
-      reuseExistingServer: true,
+      // Reuse the dev server locally; in CI always start a fresh, isolated one.
+      reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
     {
       command: 'npm run dev -w @foloprint/web',
       cwd: '../..',
       url: 'http://localhost:3000',
-      reuseExistingServer: true,
+      reuseExistingServer: !process.env.CI,
       timeout: 120_000,
     },
   ],

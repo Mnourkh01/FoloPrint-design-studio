@@ -1,5 +1,6 @@
 import Link from 'next/link';
-import { apiUrl, fetchDesign } from '@/lib/api';
+import { apiUrl, fetchDesign, fetchTemplate } from '@/lib/api';
+import type { ProductTemplateDto } from '@foloprint/shared';
 import { RenderButton } from './render-button';
 
 export const dynamic = 'force-dynamic';
@@ -21,28 +22,51 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
     );
   }
 
+  // Template gives human names for the print area keys; the page still works without it.
+  let template: ProductTemplateDto | null = null;
+  try {
+    template = await fetchTemplate(design.templateSlug);
+  } catch {
+    template = null;
+  }
+  const areaName = (key: string) =>
+    template?.printAreas.find((a) => a.key === key)?.name ?? key;
+
+  const totalObjects = design.design.placements.reduce((sum, p) => sum + p.objects.length, 0);
+  const placedAreas = design.design.placements.map((p) => areaName(p.printAreaKey)).join(', ');
+
   return (
     <div className="preview-grid">
-      <div className="preview-frame">
-        {design.previewUrl ? (
-          /* eslint-disable-next-line @next/next/no-img-element */
-          <img
-            src={`${apiUrl(design.previewUrl)}?t=${Date.parse(design.updatedAt)}`}
-            alt="Rendered product mockup"
-            data-testid="preview-image"
-          />
+      <div className="preview-stack" data-testid="preview-stack">
+        {design.previews.length > 0 ? (
+          design.previews.map((preview) => (
+            <div className="preview-frame" key={preview.printAreaKey}>
+              <p className="preview-frame__label">
+                <b>{areaName(preview.printAreaKey)}</b>
+                <span>rendered {new Date(preview.renderedAt).toLocaleString()}</span>
+              </p>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={`${apiUrl(preview.previewUrl)}?t=${Date.parse(preview.renderedAt)}`}
+                alt={`Rendered ${areaName(preview.printAreaKey)} mockup`}
+                data-testid={`preview-image-${preview.printAreaKey}`}
+              />
+            </div>
+          ))
         ) : (
-          <div className="preview-frame__empty" data-testid="preview-empty">
-            No current preview. The design changed since the last render, or it was never
-            rendered. Generate the mockup to refresh it.
+          <div className="preview-frame">
+            <div className="preview-frame__empty" data-testid="preview-empty">
+              No current previews. The design changed since the last render, or it was never
+              rendered. Generate the mockups to refresh them.
+            </div>
           </div>
         )}
       </div>
 
       <div>
-        <h1 className="page-title">Your mockup</h1>
+        <h1 className="page-title">Your mockups</h1>
         <p className="page-sub">
-          Rendered on the server from the saved design, not a screenshot of the editor.
+          Rendered on the server from the saved design, one mockup per printed side.
         </p>
 
         <dl className="kv">
@@ -50,16 +74,16 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           <dd>{design.id}</dd>
           <dt>Template</dt>
           <dd>{design.templateSlug}</dd>
-          <dt>Print area</dt>
-          <dd>{design.design.printAreaKey}</dd>
+          <dt>Print areas</dt>
+          <dd>{placedAreas}</dd>
           <dt>Objects</dt>
-          <dd>{design.design.objects.length}</dd>
+          <dd>{totalObjects}</dd>
           <dt>Saved</dt>
           <dd>{new Date(design.createdAt).toLocaleString()}</dd>
         </dl>
 
         <div className="action-row">
-          <RenderButton designId={design.id} hasPreview={Boolean(design.previewUrl)} />
+          <RenderButton designId={design.id} hasPreviews={design.previews.length > 0} />
           <Link
             href={`/editor/${design.templateSlug}?design=${design.id}`}
             className="btn btn--ghost btn--auto"

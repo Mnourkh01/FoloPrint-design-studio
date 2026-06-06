@@ -4,7 +4,6 @@ import {
   Get,
   Header,
   HttpCode,
-  NotFoundException,
   Param,
   ParseUUIDPipe,
   Post,
@@ -45,6 +44,7 @@ export class DesignsController {
     return this.designs.update(id, dto);
   }
 
+  /** Renders every placement; one preview per print area. */
   @Post(':id/render')
   @HttpCode(201)
   @Throttle({ default: { limit: RENDER_THROTTLE_LIMIT, ttl: 60_000 } })
@@ -52,14 +52,14 @@ export class DesignsController {
     return this.designs.render(id);
   }
 
-  @Get(':id/preview')
+  @Get(':id/preview/:printAreaKey')
   @Header('Content-Type', 'image/png')
   @Header('Cache-Control', 'no-cache')
-  async preview(@Param('id', ParseUUIDPipe) id: string): Promise<StreamableFile> {
-    const design = await this.designs.findEntity(id);
-    if (!design.previewPath) {
-      throw new NotFoundException('This design has not been rendered yet');
-    }
-    return new StreamableFile(this.storage.readStream(design.previewPath));
+  async preview(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('printAreaKey') printAreaKey: string,
+  ): Promise<StreamableFile> {
+    const previewPath = await this.designs.findPreview(id, printAreaKey);
+    return new StreamableFile(this.storage.readStream(previewPath));
   }
 }

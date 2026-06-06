@@ -32,10 +32,13 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
 
 - All design coordinates are in template canvas space. Object `x`/`y` is the object CENTER
   (matches Fabric origin center). `rotation` in degrees.
-- Server is the authority: every upload and design is re-validated server-side. Client clamping is
-  UX only.
+- Design document is v2: `{ version: 2, templateId, placements: [{ printAreaKey, objects }] }`.
+  Legacy v1 docs normalize at read time (`normalizeDesignDocument`) and upgrade on save.
+- Server is the authority: every upload and design is re-validated server-side, per placement
+  against its own print area. Client clamping is UX only.
 - API never returns filesystem paths. Files stream through `/assets/:id/file`,
-  `/templates/:slug/image|overlay`, `/designs/:id/preview`.
+  `/templates/:slug/image|overlay`, `/templates/:slug/areas/:key/image|overlay`,
+  `/designs/:id/preview/:printAreaKey`.
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

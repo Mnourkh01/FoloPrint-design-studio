@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, type OnModuleInit } from '@nestjs/comm
 import { ConfigService } from '@nestjs/config';
 import { createReadStream, type ReadStream } from 'node:fs';
 import { access, mkdir, unlink, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, normalize, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 /**
  * The only place in the API that touches the filesystem layout.
@@ -36,7 +36,10 @@ export class StorageService implements OnModuleInit {
   }
 
   async save(relativeKey: string, buffer: Buffer): Promise<void> {
-    await writeFile(this.resolvePath(relativeKey), buffer);
+    const absolute = this.resolvePath(relativeKey);
+    // Keys may nest (e.g. previews/<designId>/<areaKey>.png); ensure the parent exists.
+    await mkdir(dirname(absolute), { recursive: true });
+    await writeFile(absolute, buffer);
   }
 
   async exists(relativeKey: string): Promise<boolean> {

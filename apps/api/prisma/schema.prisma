@@ -35,6 +35,12 @@ model PrintArea {
   width             Int
   height            Int
   active            Boolean @default(true)
+  /// Tab/display order in the editor (front = 0, back = 1, ...).
+  sortOrder         Int     @default(0)
+  /// Area-specific view image; null falls back to ProductTemplate.baseImagePath.
+  baseImagePath     String?
+  /// Area-specific overlay; null falls back to ProductTemplate.overlayImagePath.
+  overlayImagePath  String?
 
   productTemplate ProductTemplate @relation(fields: [productTemplateId], references: [id], onDelete: Cascade)
 
@@ -59,7 +65,8 @@ model DesignProject {
   id                String   @id @default(uuid()) @db.Uuid
   productTemplateId String   @db.Uuid
   designJson        Json
-  previewPath       String?
+  /// Map of printAreaKey -> { path, renderedAt }; null/empty until rendered.
+  previewPaths      Json?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

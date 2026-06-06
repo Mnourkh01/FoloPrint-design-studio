@@ -102,23 +102,34 @@ test('arabic text: auto RTL, wrap in box, reflow, save, render, reopen', async (
   expect(wrapped.direction).toBe('rtl');
 
   // --- Narrow the box with the LEFT side handle: text reflows to more lines ---
+  // Drag all the way to the Textbox minimum width (the longest word): Fabric floors
+  // the resize there, and a min-width box lays out one word per line on EVERY
+  // platform. A fixed-distance drag is a platform lottery instead: Linux and
+  // Windows measure Naskh metrics slightly differently, so the same 60px can land
+  // on either side of a wrap threshold (seen as 2 -> 2 lines on CI).
   const stageBox = await page.getByTestId('editor-stage').boundingBox();
   if (!stageBox) throw new Error('editor stage not visible');
   const handle = await page.evaluate(() => {
     const obj = window.__studioCanvas?.getActiveObject() as unknown as {
       setCoords(): void;
       oCoords: { ml: { x: number; y: number } };
+      dynamicMinWidth: number;
     };
     obj.setCoords();
-    return { x: obj.oCoords.ml.x, y: obj.oCoords.ml.y };
+    return { x: obj.oCoords.ml.x, y: obj.oCoords.ml.y, minWidth: obj.dynamicMinWidth };
   });
+  const dragDx = Math.ceil((wrapped.width - handle.minWidth) * wrapped.zoom) + 30;
   await page.mouse.move(stageBox.x + handle.x, stageBox.y + handle.y);
   await page.mouse.down();
-  await page.mouse.move(stageBox.x + handle.x + 60, stageBox.y + handle.y, { steps: 10 });
+  await page.mouse.move(stageBox.x + handle.x + dragDx, stageBox.y + handle.y, { steps: 10 });
   await page.mouse.up();
 
   const narrowed = await getTextState(page);
+  // Sanity: a box starting at the full single-line width never wraps to one word per
+  // line on its own, so the reflow below is guaranteed to ADD lines.
+  expect(wrapped.lines.length).toBeLessThan(3);
   expect(narrowed.width).toBeLessThan(wrapped.width - 20);
+  expect(narrowed.lines.length).toBe(3); // one word per line at the minimum box width
   expect(narrowed.lines.length).toBeGreaterThan(wrapped.lines.length);
   expect(narrowed.lines.join(' ').replace(/\s+/g, ' ')).toBe('مرحبا بالعالم الواسع');
 

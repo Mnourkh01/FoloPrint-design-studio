@@ -768,13 +768,27 @@ button {
   transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
 }
 
-.area-tab img {
-  width: 30px;
-  height: 30px;
-  object-fit: cover;
-  border-radius: 6px;
+/* Cropped product miniature: zooms past the studio backdrop so the garment fills the
+   tile, reading like a real side selector instead of a tiny framed photo. */
+.area-tab__thumb {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 8px;
+  overflow: hidden;
   border: 1px solid var(--studio-line);
   background: var(--paper-deep);
+  display: block;
+}
+
+.area-tab__thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Whole garment fills the tile; collar/label keep front and back tellable apart. */
+  transform: scale(1.4);
+  transform-origin: 50% 52%;
 }
 
 .area-tab:hover {
@@ -786,6 +800,7 @@ button {
   color: var(--ink);
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
+  background: rgba(207, 63, 34, 0.05);
 }
 
 .area-tab__count {

@@ -36,6 +36,23 @@ import {
 
 const STAGE_WIDTH = 680;
 
+/**
+ * Print-area boundary styling: quiet at rest so the garment mockup carries the view,
+ * asserting itself only while the user is actually working an object.
+ */
+const BOUNDARY_QUIET = {
+  stroke: '#6b7280',
+  strokeDashArray: [5, 5],
+  strokeWidth: 1,
+  opacity: 0.55,
+};
+const BOUNDARY_ACTIVE = {
+  stroke: '#cf3f22',
+  strokeDashArray: [6, 4],
+  strokeWidth: 1.5,
+  opacity: 0.9,
+};
+
 /** View zoom (multiplier over the fit zoom) bounds for the stage zoom widget. */
 const VIEW_ZOOM_MIN = 0.5;
 const VIEW_ZOOM_MAX = 2;
@@ -525,9 +542,7 @@ export function EditorClient({
       originX: 'left',
       originY: 'top',
       fill: 'transparent',
-      stroke: '#cf3f22',
-      strokeDashArray: [6, 4],
-      strokeWidth: 1.5,
+      ...BOUNDARY_QUIET,
       strokeUniform: true,
       selectable: false,
       evented: false,
@@ -641,8 +656,15 @@ export function EditorClient({
       }
       setDirty(true); // edits make the saved design (and its previews) stale
     };
-    const onSelection = () => readSelection(canvas.getActiveObject());
-    const onCleared = () => setSelection(null);
+    const onSelection = () => {
+      boundaryRef.current?.set(BOUNDARY_ACTIVE);
+      readSelection(canvas.getActiveObject());
+    };
+    const onCleared = () => {
+      boundaryRef.current?.set(BOUNDARY_QUIET);
+      canvas.requestRenderAll();
+      setSelection(null);
+    };
     // Inline editing can grow the text box past the print area; re-fit when it ends
     // (per keystroke would fight the caret).
     const onTextEditingExited = (e: { target?: FabricObject }) => {
@@ -731,8 +753,16 @@ export function EditorClient({
 
     let cancelled = false;
 
-    // Boundary follows the active area.
-    boundary.set({ left: area.x, top: area.y, width: area.width, height: area.height, visible: true });
+    // Boundary follows the active area; switching sides always lands in the quiet state
+    // (the active object is discarded right below).
+    boundary.set({
+      left: area.x,
+      top: area.y,
+      width: area.width,
+      height: area.height,
+      visible: true,
+      ...BOUNDARY_QUIET,
+    });
     boundary.setCoords();
 
     // Only the active area's objects are visible and interactive. Hidden objects keep
@@ -1635,8 +1665,10 @@ export function EditorClient({
               data-testid={`area-tab-${a.key}`}
               onClick={() => setActiveAreaKey(a.key)}
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={apiUrl(a.imageUrl ?? template.imageUrl)} alt="" width={30} height={30} />
+              <span className="area-tab__thumb">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={apiUrl(a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
+              </span>
               {a.name}
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}
             </button>

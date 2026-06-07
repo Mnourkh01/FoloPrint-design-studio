@@ -7,7 +7,7 @@ import sharp from 'sharp';
 const FIXTURE = join(__dirname, 'fixtures', 'logo.png');
 
 // Matches the seeded "classic-tee" front print area (apps/api/prisma/seed.ts).
-const FRONT = { x: 427, y: 400, width: 400, height: 520 } as const;
+const FRONT = { x: 361, y: 270, width: 533, height: 760 } as const;
 
 interface ObjectState {
   angle: number;

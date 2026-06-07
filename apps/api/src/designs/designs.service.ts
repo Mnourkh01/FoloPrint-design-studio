@@ -35,7 +35,12 @@ import {
   type RenderResultDto,
   type StoredDesignPlacement,
 } from '@foloprint/shared';
-import { renderMockup, type OverlayBlend, type RenderObject } from '@foloprint/renderer';
+import {
+  renderMockup,
+  renderPrintFile,
+  type OverlayBlend,
+  type RenderObject,
+} from '@foloprint/renderer';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import type { CreateDesignDto, DesignObjectDto } from './dto/create-design.dto';
@@ -55,6 +60,9 @@ type PreviewPathsMap = Record<string, StoredPreview>;
 
 /** Source pixel size of an asset, keyed by id, for the advisory DPI math. */
 type AssetDimsMap = Map<string, { width: number | null; height: number | null }>;
+
+/** Production print density for downloadable print files (DTG standard). */
+const PRINT_FILE_DPI = 300;
 
 @Injectable()
 export class DesignsService {
@@ -295,44 +303,7 @@ export class DesignsService {
     for (const placement of document.placements) {
       const area = areaByKey.get(placement.printAreaKey)!; // validated above
 
-      const objects = placement.objects.map((obj, index): RenderObject => {
-        const base = { x: obj.x, y: obj.y, width: obj.width, height: obj.height, rotation: obj.rotation };
-        if (obj.type === 'text') {
-          // The renderer resolves the whitelist key to its bundled font file itself.
-          // The service resolves 'auto' direction (shared first-strong scan) and maps
-          // the final visual lines: the editor's wrappedLines for box mode, explicit
-          // breaks otherwise. The renderer never re-wraps and never guesses direction.
-          return {
-            type: 'text',
-            lines:
-              obj.wrapMode === 'box' && obj.wrappedLines
-                ? obj.wrappedLines
-                : obj.text.split('\n'),
-            fontFamily: obj.fontFamily,
-            fontSize: obj.fontSize,
-            color: obj.color,
-            align: obj.align,
-            direction: resolveTextDirection(obj.text, obj.direction),
-            ...(obj.outline ? { outline: obj.outline } : {}),
-            ...(obj.shadow ? { shadow: obj.shadow } : {}),
-            ...(obj.letterSpacing ? { letterSpacing: obj.letterSpacing } : {}),
-            ...(obj.arc ? { arc: obj.arc } : {}),
-            ...base,
-          };
-        }
-        const asset = assetById.get(obj.assetId);
-        if (!asset) {
-          throw new BadRequestException(
-            `placements[${placement.printAreaKey}].objects[${index}]: asset "${obj.assetId}" no longer exists`,
-          );
-        }
-        return {
-          type: 'image',
-          imagePath: this.storage.resolvePath(asset.storagePath),
-          ...(obj.pattern ? { pattern: obj.pattern } : {}),
-          ...base,
-        };
-      });
+      const objects = this.toRenderObjects(placement, assetById);
 
       // Area-specific view images with template-level fallback; the mask and the
       // overlay blend follow the same rule. The renderer validates the blend value,
@@ -394,6 +365,109 @@ export class DesignsService {
       designId: design.id,
       previews: this.toPreviewDtos(design.id, nextPreviews, template.printAreas),
     };
+  }
+
+  /**
+   * Maps one placement's stored objects to the renderer's shape; shared by the
+   * mockup render and the print file so the two can never disagree on how a
+   * design turns into ink. The renderer resolves the whitelist font key to its
+   * bundled file itself; the service resolves 'auto' direction (shared
+   * first-strong scan) and the final visual lines (the editor's wrappedLines
+   * for box mode, explicit breaks otherwise). The renderer never re-wraps.
+   */
+  private toRenderObjects(
+    placement: { printAreaKey: string; objects: DesignObject[] },
+    assetById: Map<string, { storagePath: string }>,
+  ): RenderObject[] {
+    return placement.objects.map((obj, index): RenderObject => {
+      const base = { x: obj.x, y: obj.y, width: obj.width, height: obj.height, rotation: obj.rotation };
+      if (obj.type === 'text') {
+        return {
+          type: 'text',
+          lines:
+            obj.wrapMode === 'box' && obj.wrappedLines
+              ? obj.wrappedLines
+              : obj.text.split('\n'),
+          fontFamily: obj.fontFamily,
+          fontSize: obj.fontSize,
+          color: obj.color,
+          align: obj.align,
+          direction: resolveTextDirection(obj.text, obj.direction),
+          ...(obj.outline ? { outline: obj.outline } : {}),
+          ...(obj.shadow ? { shadow: obj.shadow } : {}),
+          ...(obj.letterSpacing ? { letterSpacing: obj.letterSpacing } : {}),
+          ...(obj.arc ? { arc: obj.arc } : {}),
+          ...base,
+        };
+      }
+      const asset = assetById.get(obj.assetId);
+      if (!asset) {
+        throw new BadRequestException(
+          `placements[${placement.printAreaKey}].objects[${index}]: asset "${obj.assetId}" no longer exists`,
+        );
+      }
+      return {
+        type: 'image',
+        imagePath: this.storage.resolvePath(asset.storagePath),
+        ...(obj.pattern ? { pattern: obj.pattern } : {}),
+        ...base,
+      };
+    });
+  }
+
+  /**
+   * Production print file for one placed area: the ink alone on a transparent
+   * sheet at PRINT_FILE_DPI over the area's physical size. Geometry is
+   * re-validated against the CURRENT print areas first (same rule as render);
+   * generated on demand, never persisted.
+   */
+  async renderPrintFile(id: string, printAreaKey: string): Promise<Buffer> {
+    const design = await this.findEntity(id);
+    const document = this.normalizedDocumentOf(design);
+    const template = design.productTemplate;
+
+    const placement = document.placements.find((p) => p.printAreaKey === printAreaKey);
+    if (!placement) {
+      throw new NotFoundException(`Design has no artwork on print area "${printAreaKey}"`);
+    }
+
+    const validation = validateDesignPlacements(document.placements, template.printAreas);
+    if (!validation.valid) {
+      throw new BadRequestException({
+        message: 'Stored design no longer passes validation',
+        errors: validation.errors.map((e) => this.formatPlacementError(e)),
+      });
+    }
+
+    const area = template.printAreas.find((a) => a.key === printAreaKey)!; // validated above
+    const assetIds = [...new Set(this.imageAssetIdsOf([placement]))];
+    const assets = await this.prisma.uploadedAsset.findMany({ where: { id: { in: assetIds } } });
+    const objects = this.toRenderObjects(placement, new Map(assets.map((a) => [a.id, a])));
+
+    // Canvas px per inch; the shared fallback (12in platen) applies when the
+    // area has no configured physical size, exactly like the DPI advisories.
+    const ppi = printAreaPpi(area);
+    if (!ppi) {
+      throw new InternalServerErrorException(
+        `Print area "${printAreaKey}" has no usable physical size`,
+      );
+    }
+
+    try {
+      return await renderPrintFile({
+        printArea: area,
+        objects,
+        scale: PRINT_FILE_DPI / ppi.x,
+        dpi: PRINT_FILE_DPI,
+      });
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new InternalServerErrorException(
+        `Print file rendering failed for area "${printAreaKey}": ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
+    }
   }
 
   async findEntity(id: string): Promise<DesignWithTemplate> {

@@ -109,6 +109,28 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           </div>
         )}
 
+        <div className="print-files" data-testid="print-files">
+          <p className="print-files__title">Print files</p>
+          <p className="print-files__hint">
+            Production-ready ink, transparent background, 300 DPI at the printed size.
+          </p>
+          <p className="print-files__links">
+            {design.design.placements.map((placement) => (
+              <a
+                key={placement.printAreaKey}
+                className="template-card__cta"
+                href={apiUrl(
+                  `/designs/${design.id}/print-file/${encodeURIComponent(placement.printAreaKey)}`,
+                )}
+                download
+                data-testid={`print-file-${placement.printAreaKey}`}
+              >
+                {areaName(placement.printAreaKey)} ↓
+              </a>
+            ))}
+          </p>
+        </div>
+
         <div className="action-row">
           <RenderButton designId={design.id} hasPreviews={design.previews.length > 0} />
           <Link

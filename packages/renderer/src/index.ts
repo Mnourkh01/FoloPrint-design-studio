@@ -711,3 +711,121 @@ export async function renderMockup(options: RenderMockupOptions): Promise<Buffer
 
   return base.composite(layers).png().toBuffer();
 }
+
+export interface RenderPrintFileOptions {
+  /** Print area in canvas px; every object must be fully inside it. */
+  printArea: Rect;
+  objects: RenderObject[];
+  /** Output scale in print px per canvas px (e.g. 300dpi / canvas ppi). */
+  scale: number;
+  /** PNG density metadata in dots per inch; defaults to 300. */
+  dpi?: number;
+}
+
+/**
+ * Maps one render object from canvas space into print-file space: translated to
+ * the print-area origin and uniformly scaled. Pixel-valued text attributes
+ * (fontSize, letterSpacing, outline width, shadow offsets, pattern spacing)
+ * scale with the geometry so the artwork keeps its exact proportions; angles
+ * (rotation, arc sweep) are scale-invariant. Validation ALWAYS runs against the
+ * original canvas-space values; scaled values intentionally exceed the stored
+ * contract ranges.
+ */
+function scaleRenderObject(obj: RenderObject, printArea: Rect, scale: number): RenderObject {
+  const base = {
+    x: (obj.x - printArea.x) * scale,
+    y: (obj.y - printArea.y) * scale,
+    width: obj.width * scale,
+    height: obj.height * scale,
+    rotation: obj.rotation,
+  };
+  if (obj.type === 'text') {
+    return {
+      ...obj,
+      ...base,
+      fontSize: obj.fontSize * scale,
+      ...(obj.letterSpacing !== undefined ? { letterSpacing: obj.letterSpacing * scale } : {}),
+      ...(obj.outline ? { outline: { ...obj.outline, width: obj.outline.width * scale } } : {}),
+      ...(obj.shadow
+        ? {
+            shadow: {
+              ...obj.shadow,
+              offsetX: obj.shadow.offsetX * scale,
+              offsetY: obj.shadow.offsetY * scale,
+            },
+          }
+        : {}),
+    };
+  }
+  return {
+    ...obj,
+    ...base,
+    ...(obj.pattern ? { pattern: { ...obj.pattern, spacing: obj.pattern.spacing * scale } } : {}),
+  };
+}
+
+/**
+ * Compose the production print file for ONE print area: the design ink alone on
+ * a transparent sheet at print resolution (no garment photo, no mask clipping,
+ * no overlay). The sheet covers exactly the print area; geometry is validated
+ * in canvas space (the stored contract), then uniformly scaled so Pango text
+ * re-rasters crisp at print size and images resample from their source once.
+ * The PNG carries its physical density so print software reads the real size.
+ */
+export async function renderPrintFile(options: RenderPrintFileOptions): Promise<Buffer> {
+  const { printArea, objects, scale } = options;
+  const dpi = options.dpi ?? 300;
+
+  if (!Number.isFinite(scale) || scale <= 0) {
+    throw new RenderValidationError('Print scale must be a positive number');
+  }
+  if (!Number.isFinite(dpi) || dpi <= 0) {
+    throw new RenderValidationError('Print dpi must be a positive number');
+  }
+  if (objects.length === 0) {
+    throw new RenderValidationError('Design has no objects to render');
+  }
+  for (const [index, obj] of objects.entries()) {
+    assertRenderableObject(obj, index, printArea);
+  }
+
+  const sheetWidth = Math.max(1, Math.round(printArea.width * scale));
+  const sheetHeight = Math.max(1, Math.round(printArea.height * scale));
+  const printSpaceArea: Rect = { x: 0, y: 0, width: sheetWidth, height: sheetHeight };
+
+  // Shadow pixels may extend past the stored box (by contract) and a rotated
+  // layer's bounding buffer can round a pixel past the area edge; sharp rejects
+  // negative composite offsets, so compose on a margin-padded sheet and extract
+  // the exact area rect (the preparePatternLayer trick).
+  const margin = Math.ceil((SHADOW_OFFSET_MAX + 5) * scale);
+
+  const designLayers: sharp.OverlayOptions[] = [];
+  for (const original of objects) {
+    const obj = scaleRenderObject(original, printArea, scale);
+    const prepared =
+      obj.type === 'text'
+        ? await prepareTextLayer(obj)
+        : obj.pattern
+          ? await preparePatternLayer(obj, printSpaceArea)
+          : await prepareImageLayer(obj);
+    designLayers.push({ input: prepared.input, left: prepared.left + margin, top: prepared.top + margin });
+  }
+
+  const padded = await sharp({
+    create: {
+      width: sheetWidth + 2 * margin,
+      height: sheetHeight + 2 * margin,
+      channels: 4,
+      background: TRANSPARENT,
+    },
+  })
+    .composite(designLayers)
+    .png()
+    .toBuffer();
+
+  return sharp(padded)
+    .extract({ left: margin, top: margin, width: sheetWidth, height: sheetHeight })
+    .withMetadata({ density: dpi })
+    .png()
+    .toBuffer();
+}

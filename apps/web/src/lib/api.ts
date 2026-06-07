@@ -71,6 +71,20 @@ export async function removeAssetBackground(assetId: string): Promise<UploadedAs
   );
 }
 
+/** Derives a new asset cropped to the given source-pixel rect; the source stays intact. */
+export async function cropAsset(
+  assetId: string,
+  rect: { left: number; top: number; width: number; height: number },
+): Promise<UploadedAssetDto> {
+  return handle(
+    await fetch(apiUrl(`/assets/${encodeURIComponent(assetId)}/crop`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rect),
+    }),
+  );
+}
+
 export interface SaveDesignPayload {
   templateId: string;
   placements: DesignDocument['placements'];

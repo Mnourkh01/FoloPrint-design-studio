@@ -296,6 +296,59 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('POST /assets/:id/crop', () => {
+    it('derives a cropped PNG asset and leaves the source intact', async () => {
+      // makePng is a solid blue rectangle; the crop keeps its color and new dims.
+      const source = await uploadPng(200, 200);
+
+      const res = await http()
+        .post(`/assets/${source.id}/crop`)
+        .send({ left: 0, top: 0, width: 100, height: 200 })
+        .expect(201);
+      const derived = res.body as UploadedAssetDto;
+      expect(derived.id).not.toBe(source.id);
+      expect(derived.width).toBe(100);
+      expect(derived.height).toBe(200);
+      expect(derived.mimeType).toBe('image/png');
+      expect(derived.originalFilename).toMatch(/-crop\.png$/);
+
+      // The cropped file is the left band only: uniformly the accent color.
+      const png = await fetchPngBuffer(`/assets/${derived.id}/file`);
+      const meta = await sharp(png).metadata();
+      expect(meta.width).toBe(100);
+      const { data } = await sharp(png)
+        .extract({ left: 90, top: 100, width: 1, height: 1 })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      expect(data[2]).toBeGreaterThan(150); // still the solid blue near the cut edge
+      expect(data[0]).toBeLessThan(100);
+
+      // Source untouched.
+      const sourceMeta = await sharp(await fetchPngBuffer(`/assets/${source.id}/file`)).metadata();
+      expect(sourceMeta.width).toBe(200);
+    });
+
+    it('rejects rects outside the bounds, too small, or non-integer', async () => {
+      const source = await uploadPng(200, 200);
+      await http()
+        .post(`/assets/${source.id}/crop`)
+        .send({ left: 150, top: 0, width: 100, height: 200 })
+        .expect(400); // exceeds width
+      await http()
+        .post(`/assets/${source.id}/crop`)
+        .send({ left: 0, top: 0, width: 8, height: 8 })
+        .expect(400); // below the 16px floor
+      await http()
+        .post(`/assets/${source.id}/crop`)
+        .send({ left: 0.5, top: 0, width: 100, height: 100 })
+        .expect(400); // non-integer
+      await http()
+        .post('/assets/00000000-0000-4000-8000-000000000000/crop')
+        .send({ left: 0, top: 0, width: 100, height: 100 })
+        .expect(404);
+    });
+  });
+
   describe('POST /designs (v2 placements)', () => {
     it('accepts a front+back design and returns a normalized v2 document', async () => {
       const asset = await uploadPng();

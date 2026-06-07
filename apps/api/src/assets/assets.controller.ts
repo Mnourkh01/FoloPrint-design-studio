@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Param,
@@ -10,11 +11,31 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
+import { IsInt, Min } from 'class-validator';
 import type { Response } from 'express';
 import type { UploadedAssetDto } from '@foloprint/shared';
 import { memoryStorage } from 'multer';
 import { AssetsService } from './assets.service';
 import { StorageService } from '../storage/storage.service';
+
+/** Crop rect in SOURCE image pixel space; bounds-checked against the file in the service. */
+export class CropAssetDto {
+  @IsInt()
+  @Min(0)
+  left!: number;
+
+  @IsInt()
+  @Min(0)
+  top!: number;
+
+  @IsInt()
+  @Min(1)
+  width!: number;
+
+  @IsInt()
+  @Min(1)
+  height!: number;
+}
 
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES ?? 10 * 1024 * 1024);
 /** Env-overridable so the e2e suite can exceed the human-scale default. */
@@ -55,5 +76,15 @@ export class AssetsController {
   @Throttle({ default: { limit: UPLOAD_THROTTLE_LIMIT, ttl: 60_000 } })
   removeBackground(@Param('id', ParseUUIDPipe) id: string): Promise<UploadedAssetDto> {
     return this.assets.removeBackground(id);
+  }
+
+  /** Derives a new asset cropped to the given source-space rect; the source stays intact. */
+  @Post(':id/crop')
+  @Throttle({ default: { limit: UPLOAD_THROTTLE_LIMIT, ttl: 60_000 } })
+  crop(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() rect: CropAssetDto,
+  ): Promise<UploadedAssetDto> {
+    return this.assets.crop(id, rect);
   }
 }

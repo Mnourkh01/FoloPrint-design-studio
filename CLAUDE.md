@@ -46,7 +46,9 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   copies them into storage.
 - Background removal (`POST /assets/:id/remove-background`) derives a NEW png asset by
   border flood-fill (flat backgrounds only, renderer `removeFlatBackground`); the source
-  asset is immutable.
+  asset is immutable. Crop (`POST /assets/:id/crop`, body = source-space int rect) follows
+  the same derived-asset pattern; the editor's crop frame carries the image's angle so
+  rotated images crop correctly.
 - Design objects are a discriminated union on `type: "image" | "text"`; a stored object
   without `type` is a legacy image and normalizes at read time. Text fonts come from the
   shared whitelist (`packages/shared/src/fonts.ts`); binaries live in

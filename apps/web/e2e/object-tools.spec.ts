@@ -106,6 +106,72 @@ test('object tools: contextual toolbar, align to print area, rotate, physical si
   await expect(page.getByTestId('object-panel-transform')).toHaveCount(0);
 });
 
+test('crop: shrinking the frame derives a smaller asset and keeps the region in place', async ({ page }) => {
+  await page.goto('/editor/classic-tee');
+  await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
+  await page.setInputFiles('[data-testid=upload-input]', FIXTURE);
+  await page.waitForFunction(
+    () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { assetId?: string }).assetId),
+  );
+
+  const imageState = () =>
+    page.evaluate(() => {
+      const obj = (window.__studioCanvas?.getObjects() ?? []).find(
+        (o) => (o as { assetId?: string }).assetId,
+      ) as { assetId?: string; width?: number; height?: number; left?: number } | undefined;
+      if (!obj) throw new Error('no image');
+      return { assetId: obj.assetId, srcW: obj.width, srcH: obj.height, left: obj.left };
+    });
+  const before = await imageState();
+
+  // Enter crop mode: toolbar swaps to Cancel/Apply, a crop rect joins the canvas.
+  await page.getByTestId('context-tool-crop').click();
+  await expect(page.getByTestId('crop-toolbar')).toBeVisible();
+  await expect(page.getByTestId('context-toolbar')).toHaveCount(0);
+
+  // Cancel leaves everything untouched.
+  await page.getByTestId('crop-cancel').click();
+  await expect(page.getByTestId('crop-toolbar')).toHaveCount(0);
+  expect((await imageState()).assetId).toBe(before.assetId);
+
+  // Re-enter, shrink the frame to the left half programmatically, apply.
+  await page.getByTestId('context-tool-crop').click();
+  await page.evaluate(() => {
+    const canvas = window.__studioCanvas as unknown as {
+      getObjects(): Array<Record<string, unknown>>;
+      requestRenderAll(): void;
+      fire(event: string, data: object): void;
+    };
+    const rect = canvas.getObjects().find((o) => (o as { cropTag?: boolean }).cropTag) as
+      | { set(props: object): void; setCoords(): void; width: number; height: number; left: number }
+      | undefined;
+    if (!rect) throw new Error('no crop rect');
+    // Keep the left half: halve the width, shift the center left by a quarter.
+    rect.set({ width: rect.width / 2, left: rect.left - rect.width / 4 });
+    rect.setCoords();
+    canvas.requestRenderAll();
+  });
+  await page.getByTestId('crop-apply').click();
+
+  // The object swaps to the derived asset with roughly half the source width.
+  await page.waitForFunction(
+    (prev) => {
+      const obj = (window.__studioCanvas?.getObjects() ?? []).find(
+        (o) => (o as { assetId?: string }).assetId,
+      ) as { assetId?: string } | undefined;
+      return obj !== undefined && obj.assetId !== prev;
+    },
+    before.assetId,
+  );
+  const after = await imageState();
+  expect(after.srcW).toBeLessThan((before.srcW ?? 0) * 0.6);
+  expect(after.srcH).toBe(before.srcH); // height untouched
+
+  // The cropped design still saves (server re-validates the derived asset).
+  await page.getByTestId('save-design').click();
+  await expect(page.getByTestId('editor-status')).toContainText('Design saved');
+});
+
 test('remove background: swaps the selected image for a transparent derivative', async ({ page }) => {
   // Logo on a flat near-white box, generated fresh (the checked-in logo fixture
   // has no background to remove).

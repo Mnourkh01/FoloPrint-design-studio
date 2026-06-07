@@ -35,6 +35,7 @@ import {
   ApiError,
   apiUrl,
   assetFileUrl,
+  cropAsset,
   fontFileUrl,
   removeAssetBackground,
   renderDesign,
@@ -209,6 +210,12 @@ const CONTEXT_TOOL_ICONS = {
       <path d="M10 9l5 5" />
     </svg>
   ),
+  crop: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+      <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+    </svg>
+  ),
 };
 
 /**
@@ -374,7 +381,7 @@ export function EditorClient({
   const [designId, setDesignId] = useState<string | null>(initialDesign?.id ?? null);
   /** True when ANY area differs from what the server has for designId (dirty is global). */
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<'upload' | 'save' | 'render' | 'removebg' | null>(null);
+  const [busy, setBusy] = useState<'upload' | 'save' | 'render' | 'removebg' | 'crop' | null>(null);
   /** Mirrors busy for the undo/redo callbacks invoked from the keyboard handler. */
   const busyRef = useRef(busy);
   busyRef.current = busy;
@@ -438,6 +445,18 @@ export function EditorClient({
     undo: () => undefined,
     redo: () => undefined,
   });
+
+  // ---- crop mode (v1.9): an interactive rect over the selected image; Apply
+  // derives a cropped asset server-side and swaps the object in place.
+  const cropRectRef = useRef<(Rect & { cropTag?: boolean }) | null>(null);
+  const cropImageRef = useRef<(DesignedObject & FabricImage) | null>(null);
+  const [cropping, setCropping] = useState(false);
+  const croppingRef = useRef(cropping);
+  croppingRef.current = cropping;
+  /** Late-bound clamp for the canvas handlers registered once at init. */
+  const clampCropRectRef = useRef<() => void>(() => {});
+  /** Late-bound cancel for the area-switch effect (defined above the callback). */
+  const cancelCropRef = useRef<() => void>(() => {});
 
   /** The print area an object belongs to; falls back to the active one. */
   const areaOf = useCallback(
@@ -893,9 +912,20 @@ export function EditorClient({
     }
 
     const onMoving = (e: { target?: FabricObject }) => {
-      if (e.target) clampToPrintArea(e.target as DesignedObject);
+      if (!e.target) return;
+      // The crop rect clamps against ITS IMAGE, not the print area.
+      if ((e.target as { cropTag?: boolean }).cropTag) {
+        clampCropRectRef.current();
+        return;
+      }
+      clampToPrintArea(e.target as DesignedObject);
     };
     const onModified = (e: { target?: FabricObject }) => {
+      if (e.target && (e.target as { cropTag?: boolean }).cropTag) {
+        clampCropRectRef.current();
+        canvas.requestRenderAll();
+        return; // adjusting the crop frame is not a design mutation
+      }
       if (e.target) {
         clampTextScale(e.target as DesignedObject);
         fitToPrintArea(e.target as DesignedObject);
@@ -1015,6 +1045,9 @@ export function EditorClient({
     const boundary = boundaryRef.current;
     const area = template.printAreas.find((a) => a.key === activeAreaKey);
     if (!canvasReady || !canvas || !boundary || !area) return;
+
+    // A crop in progress belongs to the side being left; abandon it cleanly.
+    cancelCropRef.current();
 
     let cancelled = false;
 
@@ -1179,6 +1212,200 @@ export function EditorClient({
       setBusy(null);
     }
   };
+
+  /**
+   * The crop rect's position in SOURCE pixel space: the canvas offset between the
+   * rect center and the image center, rotated into the image frame and divided by
+   * the image scale. Works for rotated images because the rect always carries the
+   * image's own angle.
+   */
+  const cropRectLocal = useCallback(() => {
+    const rect = cropRectRef.current;
+    const img = cropImageRef.current;
+    if (!rect || !img) return null;
+    const theta = (-(img.angle ?? 0) * Math.PI) / 180;
+    const dx = (rect.left ?? 0) - (img.left ?? 0);
+    const dy = (rect.top ?? 0) - (img.top ?? 0);
+    const u = dx * Math.cos(theta) - dy * Math.sin(theta);
+    const v = dx * Math.sin(theta) + dy * Math.cos(theta);
+    const sx = img.scaleX ?? 1;
+    const sy = img.scaleY ?? 1;
+    const srcW = img.width ?? 1;
+    const srcH = img.height ?? 1;
+    const width = rect.getScaledWidth() / sx;
+    const height = rect.getScaledHeight() / sy;
+    return {
+      srcW,
+      srcH,
+      left: u / sx + srcW / 2 - width / 2,
+      top: v / sy + srcH / 2 - height / 2,
+      width,
+      height,
+    };
+  }, []);
+
+  /** Clamps the crop rect inside the image (16px source-floor) and re-syncs its angle. */
+  const clampCropRect = useCallback(() => {
+    const rect = cropRectRef.current;
+    const img = cropImageRef.current;
+    const local = cropRectLocal();
+    if (!rect || !img || !local) return;
+    const width = Math.min(Math.max(local.width, 16), local.srcW);
+    const height = Math.min(Math.max(local.height, 16), local.srcH);
+    const left = Math.min(Math.max(local.left, 0), local.srcW - width);
+    const top = Math.min(Math.max(local.top, 0), local.srcH - height);
+    const sx = img.scaleX ?? 1;
+    const sy = img.scaleY ?? 1;
+    const theta = ((img.angle ?? 0) * Math.PI) / 180;
+    const u = (left + width / 2 - local.srcW / 2) * sx;
+    const v = (top + height / 2 - local.srcH / 2) * sy;
+    rect.set({
+      width: width * sx,
+      height: height * sy,
+      scaleX: 1,
+      scaleY: 1,
+      left: (img.left ?? 0) + u * Math.cos(theta) - v * Math.sin(theta),
+      top: (img.top ?? 0) + u * Math.sin(theta) + v * Math.cos(theta),
+      angle: img.angle ?? 0,
+    });
+    rect.setCoords();
+  }, [cropRectLocal]);
+  clampCropRectRef.current = clampCropRect;
+
+  /** Enters crop mode for the selected image: full-frame rect, image locked. */
+  const startCrop = useCallback(() => {
+    const canvas = canvasRef.current;
+    const active = canvas?.getActiveObject() as (DesignedObject & FabricImage) | undefined;
+    if (!canvas || active?.kind !== 'image' || !active.assetId || croppingRef.current) return;
+    const rect = new Rect({
+      originX: 'center',
+      originY: 'center',
+      left: active.left,
+      top: active.top,
+      width: active.getScaledWidth(),
+      height: active.getScaledHeight(),
+      angle: active.angle ?? 0,
+      fill: 'rgba(207, 63, 34, 0.10)',
+      stroke: '#cf3f22',
+      strokeDashArray: [6, 4],
+      strokeWidth: 1.5,
+      strokeUniform: true,
+      lockRotation: true,
+    }) as Rect & { cropTag?: boolean };
+    rect.cropTag = true;
+    rect.setControlsVisibility({ mtr: false });
+    applySelectionStyle(rect);
+    active.set({ selectable: false, evented: false });
+    cropImageRef.current = active;
+    cropRectRef.current = rect;
+    canvas.add(rect);
+    canvas.setActiveObject(rect);
+    canvas.requestRenderAll();
+    setCropping(true);
+    setObjectTool(null);
+  }, []);
+
+  /** Leaves crop mode without touching the image. */
+  const cancelCrop = useCallback(() => {
+    const canvas = canvasRef.current;
+    const rect = cropRectRef.current;
+    const img = cropImageRef.current;
+    cropRectRef.current = null;
+    cropImageRef.current = null;
+    setCropping(false);
+    if (!canvas) return;
+    if (rect) canvas.remove(rect);
+    if (img) {
+      img.set({ selectable: true, evented: true });
+      canvas.setActiveObject(img);
+    }
+    canvas.requestRenderAll();
+  }, []);
+  cancelCropRef.current = cancelCrop;
+
+  /**
+   * Applies the crop: derives a new asset for the source-space rect and swaps the
+   * object so the kept region stays exactly where it was on the garment.
+   */
+  const applyCrop = useCallback(async () => {
+    const canvas = canvasRef.current;
+    const img = cropImageRef.current;
+    const local = cropRectLocal();
+    if (!canvas || !img?.assetId || !local) return;
+
+    const rect = {
+      left: Math.max(0, Math.round(local.left)),
+      top: Math.max(0, Math.round(local.top)),
+      width: Math.round(local.width),
+      height: Math.round(local.height),
+    };
+    rect.width = Math.min(rect.width, Math.round(local.srcW) - rect.left);
+    rect.height = Math.min(rect.height, Math.round(local.srcH) - rect.top);
+    if (rect.width < 16 || rect.height < 16) {
+      setStatus({ tone: 'error', message: 'Crop area is too small; keep at least 16px per side.' });
+      return;
+    }
+    // Full frame selected = nothing to crop.
+    if (
+      rect.left === 0 &&
+      rect.top === 0 &&
+      rect.width >= Math.round(local.srcW) &&
+      rect.height >= Math.round(local.srcH)
+    ) {
+      cancelCrop();
+      return;
+    }
+
+    setBusy('crop');
+    setStatus({ tone: 'info', message: 'Cropping...' });
+    try {
+      const derived = await cropAsset(img.assetId, rect);
+      const newImg = (await FabricImage.fromURL(apiUrl(derived.url), {
+        crossOrigin: 'anonymous',
+      })) as DesignedObject & FabricImage;
+      const sx = img.scaleX ?? 1;
+      const sy = img.scaleY ?? 1;
+      const theta = ((img.angle ?? 0) * Math.PI) / 180;
+      const u = (rect.left + rect.width / 2 - local.srcW / 2) * sx;
+      const v = (rect.top + rect.height / 2 - local.srcH / 2) * sy;
+      newImg.set({
+        originX: 'center',
+        originY: 'center',
+        left: (img.left ?? 0) + u * Math.cos(theta) - v * Math.sin(theta),
+        top: (img.top ?? 0) + u * Math.sin(theta) + v * Math.cos(theta),
+        scaleX: sx,
+        scaleY: sy,
+        angle: img.angle ?? 0,
+      });
+      applySelectionStyle(newImg);
+      newImg.kind = 'image';
+      newImg.assetId = derived.id;
+      newImg.printAreaKey = img.printAreaKey;
+
+      const cropRect = cropRectRef.current;
+      cropRectRef.current = null;
+      cropImageRef.current = null;
+      setCropping(false);
+      if (cropRect) canvas.remove(cropRect);
+      canvas.remove(img);
+      canvas.add(newImg);
+      canvas.setActiveObject(newImg);
+      canvas.requestRenderAll();
+      readSelection(newImg);
+      refreshAreaCounts();
+      markMutated();
+      setStatus({ tone: 'success', message: 'Cropped. The original upload is untouched.' });
+    } catch (error) {
+      setStatus({
+        tone: 'error',
+        message: error instanceof ApiError ? error.message : 'Crop failed.',
+        details: error instanceof ApiError ? error.details : undefined,
+      });
+      cancelCrop();
+    } finally {
+      setBusy(null);
+    }
+  }, [cropRectLocal, cancelCrop, readSelection, refreshAreaCounts, markMutated]);
 
   /** Adds an editable text object centered in the active print area. */
   const handleAddText = async () => {
@@ -1503,6 +1730,7 @@ export function EditorClient({
   );
 
   const undo = useCallback(async () => {
+    if (croppingRef.current) return; // resolve the crop first
     if (busyRef.current || restoringRef.current || undoStackRef.current.length === 0) return;
     const previous = undoStackRef.current.pop()!;
     redoStackRef.current.push(lastSnapshotRef.current);
@@ -1513,6 +1741,7 @@ export function EditorClient({
   }, [applySnapshot]);
 
   const redo = useCallback(async () => {
+    if (croppingRef.current) return; // resolve the crop first
     if (busyRef.current || restoringRef.current || redoStackRef.current.length === 0) return;
     const next = redoStackRef.current.pop()!;
     undoStackRef.current.push(lastSnapshotRef.current);
@@ -2243,7 +2472,34 @@ export function EditorClient({
         </aside>
 
         <section className="studio__stage" aria-label="Design workspace">
-          {selection && (
+          {cropping && (
+            <div
+              className="studio__context-bar"
+              role="toolbar"
+              aria-label="Crop"
+              data-testid="crop-toolbar"
+            >
+              <button
+                type="button"
+                className="studio__context-tool"
+                data-testid="crop-cancel"
+                disabled={busy !== null}
+                onClick={cancelCrop}
+              >
+                <span>Cancel</span>
+              </button>
+              <button
+                type="button"
+                className="studio__context-tool studio__context-tool--active"
+                data-testid="crop-apply"
+                disabled={busy !== null}
+                onClick={() => void applyCrop()}
+              >
+                <span>{busy === 'crop' ? 'Cropping...' : 'Apply crop'}</span>
+              </button>
+            </div>
+          )}
+          {selection && !cropping && (
             <div
               className="studio__context-bar"
               role="toolbar"
@@ -2268,16 +2524,28 @@ export function EditorClient({
                 </button>
               ))}
               {selection.kind === 'image' && (
-                <button
-                  type="button"
-                  data-testid="context-tool-remove-bg"
-                  className="studio__context-tool"
-                  disabled={busy !== null}
-                  onClick={() => void handleRemoveBackground()}
-                >
-                  {CONTEXT_TOOL_ICONS['remove-bg']}
-                  <span>{busy === 'removebg' ? 'Removing...' : 'Remove background'}</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    data-testid="context-tool-crop"
+                    className="studio__context-tool"
+                    disabled={busy !== null}
+                    onClick={startCrop}
+                  >
+                    {CONTEXT_TOOL_ICONS.crop}
+                    <span>Crop</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="context-tool-remove-bg"
+                    className="studio__context-tool"
+                    disabled={busy !== null}
+                    onClick={() => void handleRemoveBackground()}
+                  >
+                    {CONTEXT_TOOL_ICONS['remove-bg']}
+                    <span>{busy === 'removebg' ? 'Removing...' : 'Remove background'}</span>
+                  </button>
+                </>
               )}
             </div>
           )}

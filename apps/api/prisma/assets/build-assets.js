@@ -7,9 +7,11 @@
  * garment can't be reached from the border, so they stay garment automatically.
  * Largest-component filter drops background speckles.
  *
- * Overlay: garment luminance normalized to its white point, gray PNG with the
- * garment mask as alpha. Composited with 'multiply' it re-applies the photo's
- * fabric folds over flat design ink.
+ * Overlay: high-pass fold texture (pixel luma vs wide neighborhood average),
+ * confidence-faded to neutral toward flood-fill holes and the silhouette, gray
+ * PNG with the garment mask as alpha. Composited with 'multiply' it re-applies
+ * the photo's fabric folds over flat design ink without re-darkening broad
+ * shadows (re-multiplying those produced smears and seams).
  *
  * Run: node build-assets.js <assetsDir> <slug> [lumaThreshold=200]
  * e.g. node apps/api/prisma/assets/build-assets.js apps/api/prisma/assets/classic-tee classic-tee 200
@@ -153,12 +155,12 @@ async function buildSide(side) {
   // shadow cracks the flood fill cuts into the garment along deep folds, without
   // moving the outer silhouette.
   const CLOSE_R = 9;
-  const boxPass = (src, op) => {
+  const boxPass = (src, op, r = CLOSE_R) => {
     const tmp = Buffer.alloc(w * h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         let v = op === 'max' ? 0 : 255;
-        for (let k = Math.max(0, x - CLOSE_R); k <= Math.min(w - 1, x + CLOSE_R); k++) {
+        for (let k = Math.max(0, x - r); k <= Math.min(w - 1, x + r); k++) {
           const s = src[y * w + k];
           v = op === 'max' ? Math.max(v, s) : Math.min(v, s);
         }
@@ -169,7 +171,7 @@ async function buildSide(side) {
     for (let x = 0; x < w; x++) {
       for (let y = 0; y < h; y++) {
         let v = op === 'max' ? 0 : 255;
-        for (let k = Math.max(0, y - CLOSE_R); k <= Math.min(h - 1, y + CLOSE_R); k++) {
+        for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r); k++) {
           const s = tmp[k * w + x];
           v = op === 'max' ? Math.max(v, s) : Math.min(v, s);
         }
@@ -211,23 +213,43 @@ async function buildSide(side) {
     .png()
     .toFile(join(dir, `${SLUG}-${side}-mask.png`));
 
-  // --- multiply overlay: luminance / white point, alpha = garment mask ---
-  const lumaSamples = [];
-  for (let i = 0; i < w * h; i += 7) {
-    if (maskGray[i]) lumaSamples.push(luma[i]);
-  }
-  lumaSamples.sort((a, b) => a - b);
-  const whitePoint = lumaSamples[Math.floor(lumaSamples.length * 0.97)];
+  // --- multiply overlay: high-pass fold texture, confidence-faded to neutral ---
+  // Two artifact sources drove this design (both seen on the tee photo):
+  //  1. Broad shadows (the dim right side) re-multiplied over the photo produced
+  //     smears, and the flood fill cuts jagged holes through them -> visible seams
+  //     between "real shading" and "neutral" zones.
+  //  2. Any HARD spatial cutoff inside the fabric shows up as a line, because the
+  //     garment's own edge falloff makes near-cutoff values non-neutral.
+  // So: the VALUE is a high-pass (pixel vs wide neighborhood average) -> broad
+  // shadows go neutral, only crisp fold texture stays; and the value fades to
+  // neutral over a LONG feather wherever the flood fill was not confidently
+  // garment (holes, silhouette, mirror overreach) -> no seam can exist anywhere.
+  const lumaBytes = Buffer.alloc(w * h);
+  for (let i = 0; i < w * h; i++) lumaBytes[i] = Math.max(0, Math.min(255, Math.round(luma[i])));
+  const { data: lumaWide } = await sharp(lumaBytes, { raw: { width: w, height: h, channels: 1 } })
+    .blur(18)
+    .toColourspace('b-w')
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Confidence field: 1 deep inside confidently-lit garment, easing to 0 toward
+  // holes and the silhouette (small erosion + wide blur = ~40px gradient).
+  const { data: confidence } = await sharp(boxPass(litMask, 'min', 8), {
+    raw: { width: w, height: h, channels: 1 },
+  })
+    .blur(15)
+    .toColourspace('b-w')
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
   const overlayGray = Buffer.alloc(w * h);
   for (let i = 0; i < w * h; i++) {
-    // Real garment pixels carry the fabric shading; everything else multiplies
-    // by 255 (no-op) so mirrored mask overreach never darkens the backdrop.
-    // The lift (0.35 + 0.65x) softens deep folds: the base photo already shows
+    // Ratio capped at 1: the overlay only ever darkens (multiply), never lightens.
+    // The lift (0.35 + 0.65x) softens deep creases: the base photo already shows
     // them at full strength, the overlay only re-suggests them over the ink.
-    // Full-strength folds would double-darken into smears.
-    const scaled = Math.min(1, luma[i] / whitePoint);
-    overlayGray[i] = litMask[i] ? Math.round((0.35 + 0.65 * scaled) * 255) : 255;
+    const ratio = Math.min(1, luma[i] / Math.max(1, lumaWide[i]));
+    const value = (0.35 + 0.65 * ratio) * 255;
+    overlayGray[i] = Math.round(255 - ((255 - value) * confidence[i]) / 255);
   }
   // Slight blur de-speckles the flood-fill crack edges in the shading.
   const { data: overlaySoft } = await sharp(overlayGray, { raw: { width: w, height: h, channels: 1 } })
@@ -256,7 +278,6 @@ async function buildSide(side) {
         w: +((maxX - minX) / w).toFixed(3),
         h: +((maxY - minY) / h).toFixed(3),
       },
-      whitePoint: Math.round(whitePoint),
     }),
   );
 }

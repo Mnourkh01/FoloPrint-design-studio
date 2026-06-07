@@ -86,7 +86,7 @@ const BOUNDARY_ACTIVE = {
 
 /** View zoom (multiplier over the fit zoom) bounds for the stage zoom widget. */
 const VIEW_ZOOM_MIN = 0.5;
-const VIEW_ZOOM_MAX = 2;
+const VIEW_ZOOM_MAX = 3;
 const VIEW_ZOOM_STEP = 1.25;
 
 /** Client-side upload gate; mirrors the server's multer/sniff limits. */
@@ -331,7 +331,14 @@ function ensureEditorFonts(): Promise<void> {
   if (!fontsLoadedPromise) {
     fontsLoadedPromise = Promise.all(
       FONT_WHITELIST.map(async (font) => {
-        if (document.fonts.check(`16px "${font.family}"`)) return;
+        // NOTE: do NOT guard with document.fonts.check(): when no @font-face for
+        // the family exists yet, check() returns TRUE (it assumes a system
+        // fallback can render the name), so the guard skipped loading every
+        // whitelist font and all editor text fell back to a default face.
+        // Skip only if THIS exact face is already registered as loaded.
+        for (const f of document.fonts) {
+          if (f.family === font.family && f.status === 'loaded') return;
+        }
         const face = new FontFace(font.family, `url(${apiUrl(fontFileUrl(font.key))})`);
         await face.load();
         document.fonts.add(face);
@@ -492,6 +499,7 @@ export function EditorClient({
 }) {
   const router = useRouter();
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
+  const stageWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<Canvas | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const boundaryRef = useRef<Rect | null>(null);
@@ -568,6 +576,8 @@ export function EditorClient({
 
   /** Local mirror of the selected arc text's wording, for the panel input. */
   const [arcWording, setArcWording] = useState('');
+  /** Local mirror of the selected normal text's wording, for the panel input. */
+  const [textWording, setTextWording] = useState('');
 
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
@@ -1630,6 +1640,22 @@ export function EditorClient({
     canvas.requestRenderAll();
   }, [canvasReady, viewZoom, zoom, stageHeight, template.canvasWidth, template.canvasHeight]);
 
+  // ---- wheel zoom: Ctrl/Cmd + wheel over the stage (the design-tool standard) ----
+  // Plain wheel is left alone; only the modifier zooms, so it never hijacks a
+  // scroll. Non-passive listener so preventDefault stops the page from zooming.
+  useEffect(() => {
+    const el = stageWrapRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * 0.0015); // smooth, direction-correct
+      setViewZoom((v) => Math.min(VIEW_ZOOM_MAX, Math.max(VIEW_ZOOM_MIN, v * factor)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [canvasReady]);
+
   // ---- area switch: swap view images + boundary, toggle object visibility ----
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -2125,11 +2151,18 @@ export function EditorClient({
     if (!selection) setObjectTool(null);
   }, [selection]);
 
-  /** Sync the arc wording input to the active arc-text selection. */
+  /** Sync the wording inputs to the active text selection (arc vs normal). */
   useEffect(() => {
     const active = canvasRef.current?.getActiveObject() as DesignedObject | undefined;
     if (isArcText(active)) setArcWording(active.arcProps.text);
+    else if (active?.kind === 'text') setTextWording((active as DesignedText).text ?? '');
   }, [selection]);
+
+  /** Replaces the wording of the selected normal text from the panel input. */
+  const applyTextWording = useCallback(() => {
+    const next = textWording.replace(/\s+$/, '') || 'Your text';
+    updateActiveText((t) => t.set({ text: next }));
+  }, [textWording, updateActiveText]);
 
   /**
    * Applies a geometry change to the selected object (any kind), then re-fits it
@@ -2861,15 +2894,15 @@ export function EditorClient({
           <p className="text-panel__hint">
             {selection.text.arc !== null
               ? 'Edit the curved wording in the field below.'
-              : 'Double-click the text on the canvas to edit the wording.'}
+              : 'Edit the wording below, or double-click the text on the canvas.'}
           </p>
-          {selection.text.arc !== null && (
+          {selection.text.arc !== null ? (
             <label className="text-panel__field">
               Wording
               <input
                 type="text"
                 data-testid="arc-text-input"
-                value={selection.text.arc !== null ? arcWording : ''}
+                value={arcWording}
                 onChange={(e) => setArcWording(e.target.value)}
                 onBlur={() => {
                   const next = arcWording.trim() || 'Your text';
@@ -2877,6 +2910,24 @@ export function EditorClient({
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+              />
+            </label>
+          ) : (
+            <label className="text-panel__field">
+              Wording
+              <textarea
+                rows={2}
+                data-testid="text-wording-input"
+                value={textWording}
+                onChange={(e) => setTextWording(e.target.value)}
+                onBlur={applyTextWording}
+                onKeyDown={(e) => {
+                  // Enter applies; Shift+Enter inserts a line break.
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    (e.target as HTMLTextAreaElement).blur();
+                  }
                 }}
               />
             </label>
@@ -3293,15 +3344,25 @@ export function EditorClient({
           <button type="button" className="studio__mode-tab studio__mode-tab--active">
             Design
           </button>
-          {designId ? (
-            <Link className="studio__mode-tab" href={`/designs/${designId}`} data-testid="mode-mockups">
-              Mockups
-            </Link>
-          ) : (
-            <button type="button" className="studio__mode-tab" disabled title="Save the design first">
-              Mockups
-            </button>
-          )}
+          {/* Save clears the previous render, so this tab RENDERS then navigates
+              (same as the Generate button) instead of linking to an empty page.
+              Disabled until the design is saved with no pending edits. */}
+          <button
+            type="button"
+            className="studio__mode-tab"
+            data-testid="mode-mockups"
+            disabled={busy !== null || !designId || dirty}
+            title={
+              !designId
+                ? 'Save the design first'
+                : dirty
+                  ? 'Save your changes first'
+                  : 'Render and view the mockups'
+            }
+            onClick={() => void handleRender()}
+          >
+            {busy === 'render' ? 'Rendering...' : 'Mockups'}
+          </button>
         </div>
         <Link href="/designs" className="studio__close" aria-label="Close editor">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
@@ -3777,6 +3838,7 @@ export function EditorClient({
           )}
 
           <div
+            ref={stageWrapRef}
             className="studio__canvas-wrap"
             style={{ width: STAGE_WIDTH, height: stageHeight }}
             data-testid="editor-stage"

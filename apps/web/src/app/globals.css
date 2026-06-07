@@ -1300,7 +1300,9 @@ button {
 }
 
 .text-panel__field select,
-.text-panel__field input[type='number'] {
+.text-panel__field input[type='number'],
+.text-panel__field input[type='text'],
+.text-panel__field textarea {
   font: inherit;
   font-weight: 400;
   padding: 6px 8px;
@@ -1308,6 +1310,11 @@ button {
   border-radius: 6px;
   background: var(--paper);
   color: var(--ink);
+}
+
+.text-panel__field textarea {
+  resize: vertical;
+  min-height: 38px;
 }
 
 .text-panel__swatches {

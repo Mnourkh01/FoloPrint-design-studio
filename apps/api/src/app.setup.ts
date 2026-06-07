@@ -18,7 +18,7 @@ export function configureApp(app: INestApplication): void {
   const webOrigin = config.get<string>('WEB_ORIGIN') ?? 'http://localhost:3000';
   app.enableCors({
     origin: webOrigin.split(',').map((o) => o.trim()),
-    methods: ['GET', 'POST', 'PUT'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
     maxAge: 3600,
   });
 }

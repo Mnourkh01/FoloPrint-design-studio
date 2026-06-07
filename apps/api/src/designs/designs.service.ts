@@ -470,6 +470,32 @@ export class DesignsService {
     }
   }
 
+  /**
+   * Deletes a design and its rendered preview files. Files first: a failed file
+   * cleanup leaves a deletable row, while the reverse leaves orphaned files.
+   */
+  async remove(id: string): Promise<void> {
+    const design = await this.findEntity(id);
+    await this.removePreviewFiles(this.previewPathsOf(design));
+    await this.prisma.designProject.delete({ where: { id: design.id } });
+  }
+
+  /**
+   * Duplicates a design: same template, byte-identical document, no previews
+   * (the copy was never rendered). The copy is a fresh row with its own id.
+   */
+  async duplicate(id: string): Promise<DesignProjectDto> {
+    const source = await this.findEntity(id);
+    const copy = await this.prisma.designProject.create({
+      data: {
+        productTemplateId: source.productTemplateId,
+        designJson: source.designJson as Prisma.InputJsonValue,
+      },
+      include: { productTemplate: { include: { printAreas: true, colors: { include: { areaImages: true } } } } },
+    });
+    return this.toDto(copy);
+  }
+
   async findEntity(id: string): Promise<DesignWithTemplate> {
     const design = await this.prisma.designProject.findUnique({
       where: { id },

@@ -135,3 +135,18 @@ export async function fetchDesigns(page = 1): Promise<DesignListDto> {
 export async function renderDesign(id: string): Promise<RenderResultDto> {
   return handle(await fetch(apiUrl(`/designs/${encodeURIComponent(id)}/render`), { method: 'POST' }));
 }
+
+/** Deletes a design and its rendered previews. Resolves on 204; throws ApiError otherwise. */
+export async function deleteDesign(id: string): Promise<void> {
+  const res = await fetch(apiUrl(`/designs/${encodeURIComponent(id)}`), { method: 'DELETE' });
+  if (!res.ok) {
+    await handle(res); // throws with the server's message
+  }
+}
+
+/** Duplicates a design (same template + document, no previews); returns the copy. */
+export async function duplicateDesign(id: string): Promise<DesignProjectDto> {
+  return handle(
+    await fetch(apiUrl(`/designs/${encodeURIComponent(id)}/duplicate`), { method: 'POST' }),
+  );
+}

@@ -7,6 +7,7 @@ import { DesignsModule } from './designs/designs.module';
 import { FontsModule } from './fonts/fonts.module';
 import { HealthController } from './health/health.controller';
 import { PrismaModule } from './prisma/prisma.module';
+import { RenderWarmup } from './render-warmup.provider';
 import { StorageModule } from './storage/storage.module';
 import { TemplatesModule } from './templates/templates.module';
 
@@ -25,6 +26,6 @@ import { TemplatesModule } from './templates/templates.module';
     FontsModule,
   ],
   controllers: [HealthController],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }, RenderWarmup],
 })
 export class AppModule {}

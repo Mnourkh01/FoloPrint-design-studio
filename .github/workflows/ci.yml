@@ -96,7 +96,16 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # playwright.config.ts starts the API (:3001) and the web app (:3000) itself.
+      # Production web build for the Playwright run: realistic servers, faster
+      # suite, and the real start scripts get exercised. The API dist already
+      # exists from the type-gate build above. (Note: the roaming one-test stall
+      # reproduces on production servers too; retries in playwright.config.ts
+      # remain the absorber until the actual cause is found.)
+      - name: Build web (production)
+        run: npm run build -w @foloprint/web
+
+      # playwright.config.ts starts the compiled API (:3001) and the production
+      # web server (:3000) itself; in CI it never uses the dev servers.
       - name: Run Playwright tests
         run: npm run test:web
 

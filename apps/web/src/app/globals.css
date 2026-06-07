@@ -1569,6 +1569,32 @@ button {
   border-radius: 6px;
 }
 
+.preview-frame__download {
+  appearance: none;
+  margin-top: 12px;
+  width: 100%;
+  padding: 9px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.preview-frame__download:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--paper-deep);
+}
+
+.preview-frame__download:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .preview-frame__empty {
   aspect-ratio: 1;
   display: flex;

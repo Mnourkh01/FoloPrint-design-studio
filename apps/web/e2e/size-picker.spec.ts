@@ -22,6 +22,14 @@ test('garment size: pick, save, show on mockup, restore on reopen', async ({ pag
   await page.waitForURL(/\/designs\//);
   await expect(page.getByTestId('design-size')).toHaveText('XL');
 
+  // The mockup page offers a per-side download that streams a real PNG blob.
+  const dl = page.getByTestId('download-mockup-front');
+  await expect(dl).toBeVisible();
+  const previewSrc = await page.getByTestId('preview-image-front').getAttribute('src');
+  const res = await page.request.get(previewSrc!);
+  expect(res.status()).toBe(200);
+  expect(res.headers()['content-type']).toContain('image/png');
+
   // Reopen restores the chip; a clean design is not dirty until size changes.
   await page.getByTestId('edit-design').click();
   await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));

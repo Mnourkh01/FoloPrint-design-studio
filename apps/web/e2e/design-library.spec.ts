@@ -78,6 +78,10 @@ test.describe.serial('design library', () => {
     await expect(page.getByTestId('area-tab-back')).toHaveAttribute('aria-selected', 'true');
     await uploadToActiveArea(page, 'back');
 
+    // Pick the black garment; the library row and the mockup page surface it.
+    await page.getByTestId('tool-product').click();
+    await page.getByTestId('color-swatch-black').click();
+
     await page.getByTestId('save-design').click();
     await expect(page.getByTestId('editor-status')).toContainText('Design saved');
 
@@ -98,6 +102,7 @@ test.describe.serial('design library', () => {
     const chips = card.getByTestId('design-card-areas');
     await expect(chips).toContainText('Front print · 1 object');
     await expect(chips).toContainText('Back print · 1 object');
+    await expect(card.getByTestId('design-card-color')).toContainText('Black');
 
     const thumb = card.getByTestId('design-card-thumb-front');
     await expect(thumb).toBeVisible();
@@ -109,6 +114,7 @@ test.describe.serial('design library', () => {
     await page.waitForURL(new RegExp(`/designs/${designId}$`));
     await expect(page.getByTestId('preview-image-front')).toBeVisible();
     await expect(page.getByTestId('preview-image-back')).toBeVisible();
+    await expect(page.getByTestId('design-color')).toContainText('Black');
 
     // --- Back to the library via the preview page link ---
     await page.getByTestId('all-designs').click();

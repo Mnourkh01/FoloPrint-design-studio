@@ -305,6 +305,19 @@ export interface DesignPreviewDto {
   renderedAt: string;
 }
 
+/**
+ * The garment color a design resolves to, for display surfaces (library rows,
+ * mockup page). Resolved server-side the same way render resolves it: the
+ * stored colorKey when it still exists on the template, else the template
+ * default; null when the template has no colors.
+ */
+export interface DesignColorDto {
+  key: string;
+  name: string;
+  /** Swatch color, strict #RRGGBB. */
+  hex: string;
+}
+
 /** Advisory print-quality level for a placed image object. */
 export type PrintQualityLevel = 'ok' | 'warning' | 'poor';
 
@@ -325,6 +338,8 @@ export interface DesignProjectDto {
   templateSlug: string;
   /** Always normalized to the current document version (v2). */
   design: DesignDocument;
+  /** Resolved garment color for display; null when the template has no colors. */
+  color: DesignColorDto | null;
   /** One entry per rendered area; empty until the design is rendered. */
   previews: DesignPreviewDto[];
   /**
@@ -369,6 +384,11 @@ export interface DesignListItemDto {
   };
   /** Ordered by the template's area sortOrder (front before back). */
   placements: DesignPlacementSummaryDto[];
+  /**
+   * Resolved garment color for the row swatch; null when the template has no
+   * colors. An unreadable document degrades to the template default.
+   */
+  color: DesignColorDto | null;
   /** Same shape and ordering as DesignProjectDto.previews; empty until rendered. */
   previews: DesignPreviewDto[];
   /**

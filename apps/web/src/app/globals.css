@@ -1648,6 +1648,28 @@ button {
   border-color: #e7b8ab;
 }
 
+/* Garment color chip (library cards) and the inline swatch dot (mockup page). */
+.chip--color {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip__swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
+.chip--color .chip__swatch {
+  margin-right: 0;
+  vertical-align: baseline;
+}
+
 /* Advisory artwork-quality badges on library cards. */
 .chip--quality-warning {
   color: #8a6312;

@@ -454,6 +454,23 @@ export class DesignsService {
       .sort(this.byAreaOrder(printAreas, (p) => p.printAreaKey));
   }
 
+  /**
+   * Resolves the display color the same way render resolves the blank: the stored
+   * key when it still exists and is active, else the active default; null when the
+   * template has no (active) colors. An undefined colorKey (no stored choice, or
+   * an unreadable document) lands on the default.
+   */
+  private resolvedColorOf(
+    colors: TemplateColor[],
+    colorKey: string | undefined,
+  ): { key: string; name: string; hex: string } | null {
+    const color =
+      (colorKey ? colors.find((c) => c.active && c.key === colorKey) : undefined) ??
+      colors.find((c) => c.active && c.isDefault) ??
+      null;
+    return color ? { key: color.key, name: color.name, hex: color.hex } : null;
+  }
+
   /** Comparator: template area sortOrder first (front before back), key as fallback. */
   private byAreaOrder<T>(printAreas: PrintArea[], keyOf: (item: T) => string) {
     const orderOf = new Map(printAreas.map((a) => [a.key, a.sortOrder]));
@@ -500,6 +517,7 @@ export class DesignsService {
       id: design.id,
       template: { id: template.id, name: template.name, slug: template.slug },
       placements,
+      color: this.resolvedColorOf(template.colors, document?.colorKey),
       previews: this.toPreviewDtos(design.id, this.previewPathsOf(design), template.printAreas),
       worstQualityLevel,
       createdAt: design.createdAt.toISOString(),
@@ -581,6 +599,7 @@ export class DesignsService {
       templateId: design.productTemplateId,
       templateSlug: design.productTemplate.slug,
       design: document,
+      color: this.resolvedColorOf(design.productTemplate.colors, document.colorKey),
       previews: this.toPreviewDtos(
         design.id,
         this.previewPathsOf(design),

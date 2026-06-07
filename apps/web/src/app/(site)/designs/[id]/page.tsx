@@ -83,6 +83,12 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
               </dd>
             </>
           )}
+          {design.design.size && (
+            <>
+              <dt>Size</dt>
+              <dd data-testid="design-size">{design.design.size}</dd>
+            </>
+          )}
           <dt>Print areas</dt>
           <dd>{placedAreas}</dd>
           <dt>Objects</dt>

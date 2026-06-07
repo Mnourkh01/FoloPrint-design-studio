@@ -89,6 +89,8 @@ export interface SaveDesignPayload {
   templateId: string;
   /** Chosen garment color key (v2.0); omitted = the template's default color. */
   colorKey?: string;
+  /** Chosen garment size (v2.3); omitted = none picked. */
+  size?: DesignDocument['size'];
   placements: DesignDocument['placements'];
 }
 

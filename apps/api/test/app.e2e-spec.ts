@@ -353,6 +353,59 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('garment size (v2.3)', () => {
+    it('stores a chosen size, echoes it on the document and list row, round-trips on update', async () => {
+      const asset = await uploadPng();
+      const placements = [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }];
+
+      const created = (
+        await http().post('/designs').send({ templateId: template.id, size: 'L', placements }).expect(201)
+      ).body as DesignProjectDto;
+      expect(created.design.size).toBe('L');
+
+      // List row carries it too.
+      const list = (await http().get('/designs?pageSize=50').expect(200)).body as DesignListDto;
+      expect(list.items.find((i) => i.id === created.id)!.size).toBe('L');
+
+      // Update to a different size; reopen reflects it.
+      await http()
+        .put(`/designs/${created.id}`)
+        .send({ templateId: template.id, size: '2XL', placements })
+        .expect(200);
+      const reopened = (await http().get(`/designs/${created.id}`).expect(200)).body as DesignProjectDto;
+      expect(reopened.design.size).toBe('2XL');
+    });
+
+    it('omits size entirely when none was sent (byte-compat) and reports null on the row', async () => {
+      const asset = await uploadPng();
+      const created = (
+        await http()
+          .post('/designs')
+          .send({
+            templateId: template.id,
+            placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+          })
+          .expect(201)
+      ).body as DesignProjectDto;
+      expect('size' in created.design).toBe(false);
+
+      const list = (await http().get('/designs?pageSize=50').expect(200)).body as DesignListDto;
+      expect(list.items.find((i) => i.id === created.id)!.size).toBeNull();
+    });
+
+    it('rejects a size outside the whitelist', async () => {
+      const asset = await uploadPng();
+      await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          size: 'XXXL',
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+        })
+        .expect(400);
+    });
+  });
+
   describe('classic hoodie (v2.0 third product)', () => {
     it('lists the hoodie with both areas and the three colors', async () => {
       const res = await http().get('/templates').expect(200);

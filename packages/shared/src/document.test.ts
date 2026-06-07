@@ -123,6 +123,18 @@ describe('normalizeDesignDocument', () => {
     // Absent stays absent: pre-v2.0 documents must persist byte-identical.
     expect('colorKey' in normalizeDesignDocument(base)).toBe(false);
   });
+
+  it('passes size through on v2 and never invents one when absent', () => {
+    const base = {
+      version: 2 as const,
+      templateId: TEMPLATE_ID,
+      placements: [{ printAreaKey: 'front', objects: [centeredObject(FRONT)] }],
+    };
+
+    expect(normalizeDesignDocument({ ...base, size: 'L' }).size).toBe('L');
+    // Absent stays absent: pre-v2.3 documents must persist byte-identical.
+    expect('size' in normalizeDesignDocument(base)).toBe(false);
+  });
 });
 
 describe('validateDesignPlacements', () => {

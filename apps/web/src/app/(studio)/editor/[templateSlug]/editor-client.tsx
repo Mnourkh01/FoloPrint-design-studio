@@ -12,6 +12,7 @@ import {
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   FONT_WHITELIST,
+  GARMENT_SIZES,
   fontDefinitionOf,
   layoutArcGlyphs,
   LETTER_SPACING_MAX,
@@ -28,6 +29,7 @@ import {
   type DesignObject,
   type DesignPlacement,
   type DesignProjectDto,
+  type GarmentSize,
   type ImagePattern,
   type OverlayBlend,
   type PatternType,
@@ -520,6 +522,12 @@ export function EditorClient({
     if (stored && template.colors.some((c) => c.key === stored)) return stored;
     return template.colors.find((c) => c.isDefault)?.key ?? template.colors[0]?.key ?? '';
   });
+
+  /**
+   * Chosen garment size (v2.3). Order-time metadata: empty string = none picked.
+   * Like color, it lives outside the undo stack and never touches geometry.
+   */
+  const [size, setSize] = useState<GarmentSize | ''>(initialDesign?.design.size ?? '');
 
   /** Bumped once the canvas exists so area-dependent effects can run. */
   const [canvasReady, setCanvasReady] = useState(false);
@@ -2645,6 +2653,13 @@ export function EditorClient({
     if (designId) setDirty(true);
   };
 
+  /** Picks the garment size; order-time metadata, a saved design needs a re-save. */
+  const handleSizeChange = (next: GarmentSize | '') => {
+    if (next === size) return;
+    setSize(next);
+    if (designId) setDirty(true);
+  };
+
   /**
    * Opens the placement overview. The tiles snapshot the canvas state, so any
    * in-flight interaction is settled first: a crop is abandoned (same rule as
@@ -2715,6 +2730,8 @@ export function EditorClient({
         templateId: template.id,
         // Only sent when the template has colors; the server validates the key.
         ...(colorKey ? { colorKey } : {}),
+        // Order-time size, sent only when picked.
+        ...(size ? { size } : {}),
         placements,
       };
       if (designId) {
@@ -3354,6 +3371,27 @@ export function EditorClient({
                   </p>
                 </div>
               )}
+              <div className="studio__panel-section">
+                <p className="studio__panel-title">Size</p>
+                <div className="studio__sizes" role="radiogroup" aria-label="Garment size">
+                  {GARMENT_SIZES.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      role="radio"
+                      aria-checked={s === size}
+                      className={s === size ? 'size-chip size-chip--active' : 'size-chip'}
+                      data-testid={`size-chip-${s}`}
+                      onClick={() => handleSizeChange(s === size ? '' : s)}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+                <p className="studio__panel-copy">
+                  {size ? `Size ${size}` : 'No size selected (optional).'}
+                </p>
+              </div>
               <div className="studio__panel-section">
                 <p className="studio__panel-title">Print sides</p>
                 <ul className="studio__area-list">

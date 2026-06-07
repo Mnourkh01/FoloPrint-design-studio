@@ -179,9 +179,27 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  // The one shared garment palette, in seed (= picker) order. Every template
+  // carries exactly this list; the seed is the source of truth.
+  const PALETTE = [
+    'white',
+    'sand',
+    'heather',
+    'dark-heather',
+    'black',
+    'sky',
+    'royal',
+    'navy',
+    'forest',
+    'olive',
+    'red',
+    'burgundy',
+    'pink',
+  ];
+
   describe('garment colors (v2.0)', () => {
     it('templates carry the seeded colors in order with white as the default', () => {
-      expect(template.colors.map((c) => c.key)).toEqual(['white', 'black', 'heather']);
+      expect(template.colors.map((c) => c.key)).toEqual(PALETTE);
       const white = template.colors[0]!;
       expect(white.isDefault).toBe(true);
       expect(template.colors.filter((c) => c.isDefault)).toHaveLength(1);
@@ -349,7 +367,7 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       const front = hoodie!.printAreas.find((a) => a.key === 'front')!;
       expect(front.height).toBeLessThan(front.width);
 
-      expect(hoodie!.colors.map((c) => c.key)).toEqual(['white', 'black', 'heather']);
+      expect(hoodie!.colors.map((c) => c.key)).toEqual(PALETTE);
       for (const color of hoodie!.colors) {
         expect(color.imageUrl).toBe(`/templates/classic-hoodie/colors/${color.key}/image`);
         expect(color.thumbUrl).toBe(`/templates/classic-hoodie/colors/${color.key}/thumb`);
@@ -1592,8 +1610,16 @@ describe('FoloPrint Design Studio API (e2e)', () => {
   });
 
   describe('print quality warnings (advisory)', () => {
-    // Seeded front area: 400x520 canvas px over 12 x 15.6 in (uniform ~33.3 px/in).
-    // A square asset filling the area is governed by the taller Y axis (15.6 in).
+    // A square asset stretched over the whole front area is governed by the
+    // area's taller (vertical) physical axis. Expected DPI derives from the
+    // SEEDED physical size, so tuning the print-area geometry in the seed
+    // never silently breaks these tests.
+    const frontDpi = (px: number) =>
+      Math.round(Math.min(px / area('front').widthInches!, px / area('front').heightInches!));
+    /** Smallest square source that prints the front area at >= the given DPI. */
+    const pxForDpi = (dpi: number) =>
+      Math.ceil(dpi * Math.max(area('front').widthInches!, area('front').heightInches!));
+
     const fullFrontObject = (assetId: string) => {
       const front = area('front');
       return {
@@ -1615,10 +1641,10 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     };
 
     it('seeded template carries the physical print sizes', () => {
-      expect(area('front').widthInches).toBe(12);
-      expect(area('front').heightInches).toBe(15.6);
-      expect(area('back').widthInches).toBe(12);
-      expect(area('back').heightInches).toBe(16.8);
+      expect(area('front').widthInches).toBe(16);
+      expect(area('front').heightInches).toBe(22.8);
+      expect(area('back').widthInches).toBe(16);
+      expect(area('back').heightInches).toBe(22.7);
     });
 
     it('flags a low-res image as poor without blocking save or render', async () => {
@@ -1633,8 +1659,8 @@ describe('FoloPrint Design Studio API (e2e)', () => {
         assetId: tiny.id,
         level: 'poor',
       });
-      // 64px over 15.6in -> ~4 DPI, rounded integer.
-      expect(warning.effectiveDpi).toBe(4);
+      // 64px over the full area: single-digit DPI, computed from the seed.
+      expect(warning.effectiveDpi).toBe(frontDpi(64));
 
       // GET returns the same recomputed warnings.
       const fetched = await http().get(`/designs/${design.id}`).expect(200);
@@ -1646,15 +1672,17 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
 
     it('returns a warning level for mid-res and no warnings for hi-res artwork', async () => {
-      // 2000px over 15.6in -> ~128 DPI: warning band (100..149).
-      const mid = await uploadPng(2000, 2000);
+      // ~110 DPI lands in the warning band (100..149).
+      const midPx = pxForDpi(110);
+      const mid = await uploadPng(midPx, midPx);
       const midDesign = await createFrontDesign(fullFrontObject(mid.id));
       expect(midDesign.qualityWarnings).toHaveLength(1);
       expect(midDesign.qualityWarnings[0]!.level).toBe('warning');
-      expect(midDesign.qualityWarnings[0]!.effectiveDpi).toBe(128);
+      expect(midDesign.qualityWarnings[0]!.effectiveDpi).toBe(frontDpi(midPx));
 
-      // 2400px over 15.6in -> ~154 DPI: ok, list stays empty.
-      const hi = await uploadPng(2400, 2400);
+      // ~160 DPI clears the 150 threshold: ok, list stays empty.
+      const hiPx = pxForDpi(160);
+      const hi = await uploadPng(hiPx, hiPx);
       const hiDesign = await createFrontDesign(fullFrontObject(hi.id));
       expect(hiDesign.qualityWarnings).toEqual([]);
     });
@@ -1664,7 +1692,8 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       const design = await createFrontDesign(fullFrontObject(tiny.id));
       expect(design.qualityWarnings).toHaveLength(1);
 
-      const hi = await uploadPng(2400, 2400);
+      const hiPx = pxForDpi(160);
+      const hi = await uploadPng(hiPx, hiPx);
       const updated = await http()
         .put(`/designs/${design.id}`)
         .send({
@@ -1680,7 +1709,8 @@ describe('FoloPrint Design Studio API (e2e)', () => {
 
       const tiny = await uploadPng(64, 64);
       const poor = await createFrontDesign(fullFrontObject(tiny.id));
-      const hi = await uploadPng(2400, 2400);
+      const hiPx = pxForDpi(160);
+      const hi = await uploadPng(hiPx, hiPx);
       const ok = await createFrontDesign(fullFrontObject(hi.id));
       const corrupt = await prisma.designProject.create({
         data: { productTemplateId: template.id, designJson: { version: 99 } },

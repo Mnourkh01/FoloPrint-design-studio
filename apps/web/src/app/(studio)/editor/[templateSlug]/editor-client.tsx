@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
+import { Canvas, FabricImage, IText, Line, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
   ARC_GLYPH_HEIGHT_FACTOR,
   ARC_SWEEP_MAX,
@@ -86,6 +86,25 @@ const BOUNDARY_ACTIVE = {
 const VIEW_ZOOM_MIN = 0.5;
 const VIEW_ZOOM_MAX = 2;
 const VIEW_ZOOM_STEP = 1.25;
+
+/** Client-side upload gate; mirrors the server's multer/sniff limits. */
+const UPLOAD_MIME_TYPES = ['image/png', 'image/jpeg'];
+const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Drag snapping: when the dragged object's center comes within this many canvas
+ * px of a print-area centerline it snaps onto it and a guide line appears
+ * (commercial-editor behavior; dragging past the threshold releases the snap).
+ */
+const SNAP_THRESHOLD = 8;
+const SNAP_GUIDE_STYLE = {
+  stroke: '#15a8b6',
+  strokeWidth: 1.25,
+  strokeUniform: true,
+  selectable: false,
+  evented: false,
+  excludeFromExport: true,
+} as const;
 
 /** Left tool rail entries; the contextual panel renders per active tool. */
 type StudioTool = 'product' | 'uploads' | 'text' | 'saved' | 'layers';
@@ -240,6 +259,30 @@ const PATTERN_CHOICES: { key: PatternType | null; label: string }[] = [
   { key: 'grid', label: 'Grid' },
   { key: 'mirror', label: 'Mirror' },
   { key: 'half-drop', label: 'Half-drop' },
+];
+
+/**
+ * One-click logo placements for the Position tool, defined as fractions of the
+ * print area so the same presets work on every product. Each entry contains the
+ * artwork inside (w x h) of the area and anchors its CENTER at (cx, cy).
+ * "Left chest" is the wearer's left, which faces the viewer's right.
+ */
+type PlacementPreset = 'full' | 'chest-center' | 'chest-left' | 'chest-right';
+
+const PLACEMENT_SPECS: Record<PlacementPreset, { w: number; h: number; cx: number; cy: number }> = {
+  full: { w: 0.92, h: 0.92, cx: 0.5, cy: 0.5 },
+  // The areas span the whole panel (16in platen), so chest spots live in the
+  // upper zone: ~6in wide centered, ~3.5in wide left/right of the sternum.
+  'chest-center': { w: 0.38, h: 0.3, cx: 0.5, cy: 0.22 },
+  'chest-left': { w: 0.22, h: 0.18, cx: 0.75, cy: 0.15 },
+  'chest-right': { w: 0.22, h: 0.18, cx: 0.25, cy: 0.15 },
+};
+
+const PLACEMENT_PRESETS: { key: PlacementPreset; label: string }[] = [
+  { key: 'full', label: 'Full front' },
+  { key: 'chest-center', label: 'Center chest' },
+  { key: 'chest-left', label: 'Left chest' },
+  { key: 'chest-right', label: 'Right chest' },
 ];
 
 /**
@@ -480,6 +523,8 @@ export function EditorClient({
   /** Mirrors busy for the undo/redo callbacks invoked from the keyboard handler. */
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  /** True while a file is dragged over the stage (drop-to-upload affordance). */
+  const [dropActive, setDropActive] = useState(false);
 
   /** Active tool in the left rail; selecting a canvas object follows its kind. */
   const [tool, setTool] = useState<StudioTool>('uploads');
@@ -1343,6 +1388,33 @@ export function EditorClient({
       });
     }
 
+    // Centerline snap guides: one vertical + one horizontal line per drag, added
+    // lazily and removed when the drag ends. Guides are chrome, not content:
+    // unselectable, excluded from export, invisible to the save path (no kind).
+    const guides: { v: Line | null; h: Line | null } = { v: null, h: null };
+    const setGuide = (axis: 'v' | 'h', show: boolean, areaRect?: PrintAreaDto) => {
+      if (show && !guides[axis] && areaRect) {
+        const cx = areaRect.x + areaRect.width / 2;
+        const cy = areaRect.y + areaRect.height / 2;
+        const line = new Line(
+          axis === 'v'
+            ? [cx, areaRect.y, cx, areaRect.y + areaRect.height]
+            : [areaRect.x, cy, areaRect.x + areaRect.width, cy],
+          SNAP_GUIDE_STYLE,
+        );
+        guides[axis] = line;
+        canvas.add(line);
+        canvas.bringObjectToFront(line);
+      } else if (!show && guides[axis]) {
+        canvas.remove(guides[axis]!);
+        guides[axis] = null;
+      }
+    };
+    const clearGuides = () => {
+      setGuide('v', false);
+      setGuide('h', false);
+    };
+
     const onMoving = (e: { target?: FabricObject }) => {
       if (!e.target) return;
       // The crop rect clamps against ITS IMAGE, not the print area.
@@ -1350,13 +1422,38 @@ export function EditorClient({
         clampCropRectRef.current();
         return;
       }
-      clampToPrintArea(e.target as DesignedObject);
+      const target = e.target as DesignedObject;
+      clampToPrintArea(target);
+
+      // Snap the object center onto the print-area centerlines while dragging;
+      // moving past the threshold on the next event releases the snap.
+      const areaRect = areaOf(target);
+      if (areaRect && target.kind) {
+        const center = target.getCenterPoint();
+        const dx = areaRect.x + areaRect.width / 2 - center.x;
+        const dy = areaRect.y + areaRect.height / 2 - center.y;
+        const snapV = Math.abs(dx) <= SNAP_THRESHOLD;
+        const snapH = Math.abs(dy) <= SNAP_THRESHOLD;
+        if (snapV || snapH) {
+          target.set({
+            left: (target.left ?? 0) + (snapV ? dx : 0),
+            top: (target.top ?? 0) + (snapH ? dy : 0),
+          });
+          target.setCoords();
+        }
+        setGuide('v', snapV, areaRect);
+        setGuide('h', snapH, areaRect);
+      } else {
+        clearGuides();
+      }
+
       // Dragging a patterned tile re-phases its preview fill (cheap path).
-      if ((e.target as DesignedObject).pattern) {
-        patternHooksRef.current.offset(e.target as DesignedObject);
+      if (target.pattern) {
+        patternHooksRef.current.offset(target);
       }
     };
     const onModified = (e: { target?: FabricObject }) => {
+      clearGuides(); // the drag (or transform) is over; snap chrome goes away
       if (e.target && (e.target as { cropTag?: boolean }).cropTag) {
         clampCropRectRef.current();
         canvas.requestRenderAll();
@@ -1379,6 +1476,7 @@ export function EditorClient({
       readSelection(canvas.getActiveObject());
     };
     const onCleared = () => {
+      clearGuides();
       boundaryRef.current?.set(BOUNDARY_QUIET);
       canvas.requestRenderAll();
       setSelection(null);
@@ -1455,6 +1553,7 @@ export function EditorClient({
     initialDesign,
     zoom,
     stageHeight,
+    areaOf,
     clampToPrintArea,
     clampTextScale,
     fitToPrintArea,
@@ -1559,10 +1658,60 @@ export function EditorClient({
     };
   }, [canvasReady, activeAreaKey, template, designedObjects, loadViewImage, viewImagesOf]);
 
+  // A file dropped OUTSIDE the drop zone must never nuke the editor: the
+  // browser's default is to NAVIGATE to the dropped image, replacing the app
+  // (and the unsaved design) with the file. Intercept at the window level;
+  // the stage's own drop handler still runs first and uploads the file.
+  useEffect(() => {
+    const guard = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+    };
+    window.addEventListener('dragover', guard);
+    window.addEventListener('drop', guard);
+    return () => {
+      window.removeEventListener('dragover', guard);
+      window.removeEventListener('drop', guard);
+    };
+  }, []);
+
+  const handleStageDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!dropActive) setDropActive(true);
+  };
+  const handleStageDragLeave = (e: React.DragEvent) => {
+    // Children fire dragleave too; only count actually exiting the stage.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDropActive(false);
+  };
+  const handleStageDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDropActive(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) void handleUpload(file);
+  };
+
   const handleUpload = async (file: File) => {
     const canvas = canvasRef.current;
     const area = activeArea;
-    if (!canvas || !area) return;
+    if (!canvas || !area || busy !== null) return;
+    // Reject obvious misfits before spending a request (and upload-throttle
+    // budget) on them; the server still re-validates everything.
+    if (!UPLOAD_MIME_TYPES.includes(file.type)) {
+      setStatus({
+        tone: 'error',
+        message: `"${file.name}" is not a PNG or JPEG. Export the artwork as PNG and try again.`,
+      });
+      return;
+    }
+    if (file.size > UPLOAD_MAX_BYTES) {
+      setStatus({
+        tone: 'error',
+        message: `"${file.name}" is ${(file.size / (1024 * 1024)).toFixed(1)} MB; uploads are capped at 10 MB.`,
+      });
+      return;
+    }
     setBusy('upload');
     setStatus({ tone: 'info', message: `Uploading ${file.name}...` });
     try {
@@ -1600,9 +1749,17 @@ export function EditorClient({
         message: `${asset.originalFilename} added to ${area.name}. Drag, resize, and rotate it inside the print area.`,
       });
     } catch (error) {
+      // The global rate limiter answers 429 with a developer-facing message;
+      // translate it for the person clicking the button.
+      const message =
+        error instanceof ApiError
+          ? error.status === 429
+            ? 'Too many uploads in a row. Give it a minute, then try again.'
+            : error.message
+          : 'Upload failed.';
       setStatus({
         tone: 'error',
-        message: error instanceof ApiError ? error.message : 'Upload failed.',
+        message,
         details: error instanceof ApiError ? error.details : undefined,
       });
     } finally {
@@ -1975,6 +2132,35 @@ export function EditorClient({
         if (action === 'center-v') dy = area.y + (area.height - box.height) / 2 - box.top;
         if (action === 'bottom') dy = area.y + area.height - (box.top + box.height);
         obj.set({ left: (obj.left ?? 0) + dx, top: (obj.top ?? 0) + dy });
+      }),
+    [updateActiveObject, areaOf],
+  );
+
+  /**
+   * Applies a one-click placement preset to the selected logo: contain-fits the
+   * image inside the preset's fraction of its print area and anchors its center.
+   * Rotation resets to 0 so the result is predictable; patterned tiles are
+   * excluded (their fill already covers the whole area).
+   */
+  const applyPlacementPreset = useCallback(
+    (preset: PlacementPreset) =>
+      updateActiveObject((obj) => {
+        const area = areaOf(obj);
+        if (!area || obj.kind !== 'image' || obj.pattern) return;
+        const spec = PLACEMENT_SPECS[preset];
+        const naturalWidth = obj.width ?? 1;
+        const naturalHeight = obj.height ?? 1;
+        const scale = Math.min(
+          (area.width * spec.w) / naturalWidth,
+          (area.height * spec.h) / naturalHeight,
+        );
+        obj.set({
+          angle: 0,
+          scaleX: scale,
+          scaleY: scale,
+          left: area.x + area.width * spec.cx,
+          top: area.y + area.height * spec.cy,
+        });
       }),
     [updateActiveObject, areaOf],
   );
@@ -3268,7 +3454,20 @@ export function EditorClient({
           )}
         </aside>
 
-        <section className="studio__stage" aria-label="Design workspace">
+        <section
+          className="studio__stage"
+          aria-label="Design workspace"
+          onDragOver={handleStageDragOver}
+          onDragLeave={handleStageDragLeave}
+          onDrop={handleStageDrop}
+        >
+          {dropActive && (
+            <div className="studio__dropzone" data-testid="stage-dropzone">
+              <span>
+                Drop to upload to <strong>{activeArea?.name ?? 'this side'}</strong>
+              </span>
+            </div>
+          )}
           {cropping && (
             <div
               className="studio__context-bar"
@@ -3470,6 +3669,27 @@ export function EditorClient({
                   </button>
                 ))}
               </div>
+              {/* One-click logo placements: front of the garment only (chest
+                  wording makes no sense on the back), single images only
+                  (patterned tiles already fill the area). */}
+              {selection.kind === 'image' && !selection.pattern && activeArea?.key === 'front' && (
+                <>
+                  <p className="studio__object-panel-title">Placement</p>
+                  <div className="studio__preset-row" role="group" aria-label="Placement presets">
+                    {PLACEMENT_PRESETS.map((preset) => (
+                      <button
+                        key={preset.key}
+                        type="button"
+                        className="studio__preset-btn"
+                        data-testid={`placement-${preset.key}`}
+                        onClick={() => applyPlacementPreset(preset.key)}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
           )}
 

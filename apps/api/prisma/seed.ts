@@ -61,17 +61,33 @@ interface ColorSpec {
  * garment mask -> tinted blank), so no extra photo binaries live in the repo.
  * The mask and the multiply overlay stay color-independent: they carry the
  * photo's geometry and shading, which the recolor preserves.
+ *
+ * One shared palette for every template (the array order is the picker order):
+ * neutrals light -> dark, then blues, greens, warms. Keys are forever: stored
+ * designs reference them, so rename/remove means a data migration.
  */
 const COLORS: ColorSpec[] = [
   { key: 'white', name: 'White', hex: '#f2f2f0', isDefault: true },
-  { key: 'black', name: 'Black', hex: '#232227' },
+  { key: 'sand', name: 'Sand', hex: '#ddd3bd' },
   { key: 'heather', name: 'Heather Gray', hex: '#a7a7a3', noise: 0.11 },
+  { key: 'dark-heather', name: 'Dark Heather', hex: '#4a4a4f', noise: 0.09 },
+  { key: 'black', name: 'Black', hex: '#232227' },
+  { key: 'sky', name: 'Sky Blue', hex: '#a9c6e0' },
+  { key: 'royal', name: 'Royal Blue', hex: '#2451a6' },
+  { key: 'navy', name: 'Navy', hex: '#1f2a44' },
+  { key: 'forest', name: 'Forest Green', hex: '#234633' },
+  { key: 'olive', name: 'Olive', hex: '#5b6044' },
+  { key: 'red', name: 'Red', hex: '#b3202c' },
+  { key: 'burgundy', name: 'Burgundy', hex: '#6e2433' },
+  { key: 'pink', name: 'Pink', hex: '#e7b9c6' },
 ];
 
 /**
- * Print areas sit on the chest / upper back of each photographed garment,
- * measured from its mask bbox (build-assets.js prints it): a 12 inch print
- * centered on the torso, like the DTG platen it models.
+ * Print areas model an oversized 16 inch DTG platen (Printful-style): the
+ * printable zone covers nearly the whole front/back panel, collar to hem,
+ * seam to seam, so chest-left/right/center logo placements all live INSIDE
+ * one area. Geometry measured against each photo (mask bbox + luma dips);
+ * the garment mask clips ink at render time, so edge overlap is safe.
  */
 const TEMPLATES: TemplateSpec[] = [
   {
@@ -79,9 +95,10 @@ const TEMPLATES: TemplateSpec[] = [
     name: 'Classic Tee',
     canvas: 1254,
     areas: [
-      // Torso spans ~x 340..920, centerline x 627.
-      { key: 'front', name: 'Front print', x: 427, y: 400, width: 400, height: 520, widthInches: 12, heightInches: 15.6, sortOrder: 0, ownImages: false },
-      { key: 'back', name: 'Back print', x: 427, y: 360, width: 400, height: 560, widthInches: 12, heightInches: 16.8, sortOrder: 1, ownImages: true },
+      // Torso spans ~x 340..920, centerline x 627; ~33.3 px/in. Top edge sits
+      // AT the collar (user-tuned); the garment mask clips any collar overlap.
+      { key: 'front', name: 'Front print', x: 361, y: 270, width: 533, height: 760, widthInches: 16, heightInches: 22.8, sortOrder: 0, ownImages: false },
+      { key: 'back', name: 'Back print', x: 361, y: 240, width: 533, height: 756, widthInches: 16, heightInches: 22.7, sortOrder: 1, ownImages: true },
     ],
   },
   {
@@ -90,8 +107,8 @@ const TEMPLATES: TemplateSpec[] = [
     canvas: 1254,
     areas: [
       // Garment bbox ~x 174..1082, centerline x 628; uniform 35 px/in.
-      { key: 'front', name: 'Front print', x: 418, y: 380, width: 420, height: 525, widthInches: 12, heightInches: 15, sortOrder: 0, ownImages: false },
-      { key: 'back', name: 'Back print', x: 418, y: 340, width: 420, height: 560, widthInches: 12, heightInches: 16, sortOrder: 1, ownImages: true },
+      { key: 'front', name: 'Front print', x: 348, y: 280, width: 560, height: 720, widthInches: 16, heightInches: 20.6, sortOrder: 0, ownImages: false },
+      { key: 'back', name: 'Back print', x: 348, y: 250, width: 560, height: 730, widthInches: 16, heightInches: 20.9, sortOrder: 1, ownImages: true },
     ],
   },
   {
@@ -104,11 +121,12 @@ const TEMPLATES: TemplateSpec[] = [
     canvas: 1254,
     areas: [
       // Garment bbox ~x 226..1028, centerline x 627; ~31.7 px/in. The front
-      // print zone is short on purpose: hood drape ends ~y 455 and the kangaroo
-      // pocket seam starts ~y 720 (both measured from the photo's luma dips).
-      { key: 'front', name: 'Front print', x: 437, y: 465, width: 380, height: 240, widthInches: 12, heightInches: 7.6, sortOrder: 0, ownImages: false },
+      // print zone stays short on purpose: hood drape ends ~y 455 and the
+      // kangaroo pocket seam starts ~y 720 (measured from the photo's luma
+      // dips); DTG cannot print across the pocket.
+      { key: 'front', name: 'Front print', x: 374, y: 460, width: 506, height: 255, widthInches: 16, heightInches: 8, sortOrder: 0, ownImages: false },
       // Back runs from below the hood drape (~y 390) to the hem ribbing (~y 1010).
-      { key: 'back', name: 'Back print', x: 437, y: 450, width: 380, height: 510, widthInches: 12, heightInches: 16.1, sortOrder: 1, ownImages: true },
+      { key: 'back', name: 'Back print', x: 374, y: 400, width: 506, height: 600, widthInches: 16, heightInches: 19, sortOrder: 1, ownImages: true },
     ],
   },
 ];

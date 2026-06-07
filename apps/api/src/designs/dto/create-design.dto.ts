@@ -21,6 +21,8 @@ import {
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   HEX_COLOR_PATTERN,
+  LETTER_SPACING_MAX,
+  LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
   OUTLINE_WIDTH_MIN,
   SHADOW_OFFSET_MAX,
@@ -172,6 +174,14 @@ export class DesignObjectDto {
   @ValidateNested()
   @Type(() => TextShadowDto)
   shadow?: TextShadowDto;
+
+  /** Extra space between glyphs, canvas px (v1.8); missing means font default. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(LETTER_SPACING_MIN)
+  @Max(LETTER_SPACING_MAX)
+  letterSpacing?: number;
 }
 
 /** All artwork for one print area. Placements with zero objects are rejected. */

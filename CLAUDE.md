@@ -66,7 +66,11 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   box). Server: outline ring-composited at width/2 BEFORE the fit-to-box, shadow
   composited AFTER the fit at exact canvas px; shadow pixels may extend past the
   stored box (bounded by the offset clamp) while geometry validation stays on the
-  glyph box.
+  glyph box. Optional `letterSpacing` (canvas px, -20..100): Fabric em-based
+  charSpacing in the editor, Pango letter_spacing span on the server. libvips
+  parses the text param as Pango MARKUP, so the renderer markup-escapes every
+  user line (`escapePangoMarkup`); only validated numeric attribute values are
+  ever emitted as markup.
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

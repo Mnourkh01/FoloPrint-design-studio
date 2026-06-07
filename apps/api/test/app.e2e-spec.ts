@@ -1015,6 +1015,33 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       ]).expect(400);
       expect(JSON.stringify(res.body)).toMatch(/must not carry text fields/i);
     });
+
+    it('saves, renders, and reopens text with letter spacing', async () => {
+      const res = await postFront([textIn(area('front'), { letterSpacing: 12 })]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({ letterSpacing: 12 });
+
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+
+      const reopened = await http().get(`/designs/${dto.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        letterSpacing: 12,
+      });
+    });
+
+    it('rejects out-of-range letter spacing', async () => {
+      await postFront([textIn(area('front'), { letterSpacing: -21 })]).expect(400);
+      await postFront([textIn(area('front'), { letterSpacing: 101 })]).expect(400);
+    });
+
+    it('renders text containing markup characters literally (escaping regression)', async () => {
+      const res = await postFront([
+        textIn(area('front'), { text: 'a < b & <b>c</b>', letterSpacing: 8 }),
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      await http().get(`/designs/${dto.id}/preview/front`).expect(200);
+    });
   });
 
   describe('GET /fonts/:key/file', () => {

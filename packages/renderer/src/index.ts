@@ -2,6 +2,8 @@ import sharp from 'sharp';
 import {
   HEX_COLOR_PATTERN,
   isObjectInsideRect,
+  LETTER_SPACING_MAX,
+  LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
   OUTLINE_WIDTH_MIN,
   OVERLAY_BLENDS,
@@ -29,6 +31,18 @@ const TRANSPARENT = { r: 0, g: 0, b: 0, alpha: 0 } as const;
 
 /** Pango raster density: at 72 dpi, 1 Pango point = 1 pixel, so fontSize maps 1:1. */
 const TEXT_DPI = 72;
+
+/** Pango fixed-point scale: 1024 units per point (= per pixel at TEXT_DPI). */
+const PANGO_SCALE = 1024;
+
+/**
+ * Pango markup escape. libvips parses the text param as Pango MARKUP
+ * unconditionally, so every user character must go through this; a raw '<'
+ * would otherwise abort the whole render as malformed markup. Attribute values
+ * we emit ourselves (letter_spacing) are validated numbers, never user input.
+ */
+const escapePangoMarkup = (value: string): string =>
+  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 interface RenderObjectGeometry {
   /** Object center X in canvas px. */
@@ -83,6 +97,8 @@ export interface RenderTextObject extends RenderObjectGeometry {
    * layer is padded symmetrically so the rotation pivot stays at the glyph center.
    */
   shadow?: TextShadow;
+  /** Extra space between glyphs in canvas px (v1.8); 0/absent = font default. */
+  letterSpacing?: number;
 }
 
 export type RenderObject = RenderImageObject | RenderTextObject;
@@ -230,9 +246,14 @@ async function prepareTextLayer(obj: RenderTextObject): Promise<PreparedLayer> {
   // Each line gets the resolved direction mark so every Pango paragraph shares the
   // object's base direction (a line starting with an opposite-direction strong char
   // would otherwise flip on the server but not in the editor). Wrap is never used:
-  // the lines were finalized by the editor.
+  // the lines were finalized by the editor. Every line is markup-escaped (vips
+  // always parses markup); the optional letter_spacing span wraps the whole text
+  // with an attribute value we computed ourselves.
   const mark = DIRECTION_MARK[obj.direction];
-  const pangoText = obj.lines.map((line) => mark + line).join('\n');
+  const escaped = obj.lines.map((line) => mark + escapePangoMarkup(line)).join('\n');
+  const pangoText = obj.letterSpacing
+    ? `<span letter_spacing="${Math.round(obj.letterSpacing * PANGO_SCALE)}">${escaped}</span>`
+    : escaped;
   const align = obj.direction === 'rtl' ? PANGO_ALIGN_RTL[obj.align] : PANGO_ALIGN[obj.align];
 
   const raster = await sharp({
@@ -358,6 +379,15 @@ function assertRenderableObject(obj: RenderObject, index: number, printArea: Rec
         Math.abs(obj.shadow.offsetY) > SHADOW_OFFSET_MAX
       ) {
         throw new RenderValidationError(`Design object ${index} has an invalid shadow`);
+      }
+    }
+    if (obj.letterSpacing !== undefined) {
+      if (
+        !Number.isFinite(obj.letterSpacing) ||
+        obj.letterSpacing < LETTER_SPACING_MIN ||
+        obj.letterSpacing > LETTER_SPACING_MAX
+      ) {
+        throw new RenderValidationError(`Design object ${index} has an invalid letter spacing`);
       }
     }
   }

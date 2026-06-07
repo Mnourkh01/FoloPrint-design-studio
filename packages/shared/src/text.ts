@@ -30,6 +30,9 @@ export const OUTLINE_WIDTH_MIN = 1;
 export const OUTLINE_WIDTH_MAX = 20;
 /** Max absolute shadow offset per axis, canvas px (v1.8). */
 export const SHADOW_OFFSET_MAX = 25;
+/** Letter spacing bounds, canvas px between glyphs (v1.8). */
+export const LETTER_SPACING_MIN = -20;
+export const LETTER_SPACING_MAX = 100;
 
 /**
  * Control characters are rejected except `\n` (explicit line breaks).
@@ -114,7 +117,8 @@ function imageObjectContentErrors(
     carried.wrapMode !== undefined ||
     carried.wrappedLines !== undefined ||
     carried.outline !== undefined ||
-    carried.shadow !== undefined
+    carried.shadow !== undefined ||
+    carried.letterSpacing !== undefined
   ) {
     errors.push('Image object must not carry text fields');
   }
@@ -177,6 +181,15 @@ function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text'
   errors.push(...wrappedLinesErrors(obj, wrapMode));
   errors.push(...outlineErrors(obj.outline));
   errors.push(...shadowErrors(obj.shadow));
+
+  if (
+    obj.letterSpacing !== undefined &&
+    (!isFiniteNumber(obj.letterSpacing) ||
+      obj.letterSpacing < LETTER_SPACING_MIN ||
+      obj.letterSpacing > LETTER_SPACING_MAX)
+  ) {
+    errors.push(`Letter spacing must be between ${LETTER_SPACING_MIN} and ${LETTER_SPACING_MAX}`);
+  }
 
   return errors;
 }

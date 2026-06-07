@@ -180,11 +180,12 @@ test('text effects: outline and shadow set in the panel survive save, render, re
     () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),
   );
 
-  // Enable both effects and adjust them through the panel controls.
+  // Enable both effects, set letter spacing, all through the panel controls.
   await page.getByTestId('text-outline-toggle').check();
   await page.getByTestId('text-outline-width').fill('6');
   await page.getByTestId('text-shadow-toggle').check();
   await page.getByTestId('text-shadow-x').fill('8');
+  await page.getByTestId('text-letter-spacing-input').fill('10');
 
   const effectsState = () =>
     page.evaluate(() => {
@@ -194,6 +195,9 @@ test('text effects: outline and shadow set in the panel survive save, render, re
         | {
             stroke?: unknown;
             strokeWidth?: number;
+            charSpacing?: number;
+            fontSize?: number;
+            scaleY?: number;
             shadow?: { color?: string; offsetX?: number; offsetY?: number } | null;
           }
         | undefined;
@@ -202,6 +206,10 @@ test('text effects: outline and shadow set in the panel survive save, render, re
         stroke: obj.stroke,
         strokeWidth: obj.strokeWidth,
         shadow: obj.shadow ? { x: obj.shadow.offsetX, y: obj.shadow.offsetY } : null,
+        spacingPx: ((obj.charSpacing ?? 0) / 1000) * (obj.fontSize ?? 0) * (obj.scaleY ?? 1),
+        charSpacing: obj.charSpacing,
+        fontSize: obj.fontSize,
+        scaleY: obj.scaleY,
       };
     });
 
@@ -209,6 +217,7 @@ test('text effects: outline and shadow set in the panel survive save, render, re
   expect(before.stroke).toBe('#ffffff');
   expect(before.strokeWidth).toBe(6);
   expect(before.shadow).toEqual({ x: 8, y: 4 });
+  expect(before.spacingPx).toBeCloseTo(10, 0);
 
   // Save, render, reopen: the effects round-trip through the stored document.
   await page.getByTestId('save-design').click();
@@ -226,6 +235,9 @@ test('text effects: outline and shadow set in the panel survive save, render, re
   expect(after.strokeWidth).toBeCloseTo(6, 0);
   expect(after.shadow?.x).toBeCloseTo(8, 0);
   expect(after.shadow?.y).toBeCloseTo(4, 0);
+  expect(after.spacingPx).toBeCloseTo(10, 0);
+  // Reopen must not inflate outlined text (stroke-inclusive box math).
+  expect(after.scaleY ?? 1).toBeCloseTo(1, 1);
 });
 
 test('mixed design: image and text on the same area save and render together', async ({ page }) => {

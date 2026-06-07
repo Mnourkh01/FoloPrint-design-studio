@@ -312,6 +312,44 @@ describe('renderMockup text outline and shadow (v1.8)', () => {
     expect(red).toBeGreaterThan(30);
   });
 
+  it('letter spacing changes the glyph layout inside the fitted box', async () => {
+    // Render-then-fit normalizes the run to the same box, so spacing shows up as
+    // inter-glyph gaps: the same box holds visibly FEWER glyph pixels, and the
+    // output differs byte-wise from the unspaced render.
+    const render = (letterSpacing?: number) =>
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [textObject({ lines: ['Hi'], ...(letterSpacing ? { letterSpacing } : {}) })],
+      });
+
+    const plain = await render();
+    const spaced = await render(40);
+    expect(plain.equals(spaced)).toBe(false);
+
+    const box = { left: 120, top: 170, width: 160, height: 60 };
+    const plainCount = await countRedPixels(plain, box);
+    const spacedCount = await countRedPixels(spaced, box);
+    expect(spacedCount).toBeLessThan(plainCount * 0.85); // gaps replaced glyph area
+    expect(spacedCount).toBeGreaterThan(50); // glyphs still render
+  });
+
+  it('escapes markup characters instead of parsing them (vips parses Pango markup)', async () => {
+    // A raw '<' used to abort the render as malformed markup; '<b>' must render
+    // literally, never as a bold tag.
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ lines: ['a < b & <b>c</b>'], letterSpacing: 10 })],
+    });
+    const inside = await countRedPixels(buffer, { left: 120, top: 170, width: 160, height: 60 });
+    expect(inside).toBeGreaterThan(50);
+  });
+
   it('rejects invalid outline and shadow values', async () => {
     const base = {
       baseImagePath: basePath,
@@ -330,6 +368,9 @@ describe('renderMockup text outline and shadow (v1.8)', () => {
         ...base,
         objects: [textObject({ shadow: { color: '#0000cc', offsetX: 99, offsetY: 0 } })],
       }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({ ...base, objects: [textObject({ letterSpacing: 999 })] }),
     ).rejects.toThrow(RenderValidationError);
   });
 });

@@ -340,4 +340,19 @@ describe('designObjectContentErrors for text outline and shadow (v1.8)', () => {
       expect.stringMatching(/Shadow must be an object/),
     );
   });
+
+  it('accepts in-range letter spacing and rejects out-of-range values', () => {
+    expect(errorsOf({ letterSpacing: 0 })).toEqual([]);
+    expect(errorsOf({ letterSpacing: -20 })).toEqual([]);
+    expect(errorsOf({ letterSpacing: 100 })).toEqual([]);
+    expect(errorsOf({ letterSpacing: -21 })).toContainEqual(
+      expect.stringMatching(/Letter spacing/),
+    );
+    expect(errorsOf({ letterSpacing: 101 })).toContainEqual(
+      expect.stringMatching(/Letter spacing/),
+    );
+    expect(errorsOf({ letterSpacing: Number.NaN })).toContainEqual(
+      expect.stringMatching(/Letter spacing/),
+    );
+  });
 });

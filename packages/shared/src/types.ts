@@ -104,6 +104,12 @@ export interface TextDesignObject extends DesignObjectBase {
   outline?: TextOutline;
   /** Hard drop shadow (v1.8); absent = none. */
   shadow?: TextShadow;
+  /**
+   * Extra space between glyphs in canvas px (v1.8); absent or 0 = font default.
+   * Negative values tighten. The editor maps it to Fabric's em-based charSpacing,
+   * the renderer to Pango letter_spacing.
+   */
+  letterSpacing?: number;
 }
 
 /**

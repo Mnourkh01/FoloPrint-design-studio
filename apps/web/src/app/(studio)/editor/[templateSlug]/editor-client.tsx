@@ -10,6 +10,8 @@ import {
   FONT_SIZE_MIN,
   FONT_WHITELIST,
   fontDefinitionOf,
+  LETTER_SPACING_MAX,
+  LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
   OUTLINE_WIDTH_MIN,
   printAreaPpi,
@@ -316,6 +318,8 @@ interface SelectionReadout {
     outline: TextOutline | null;
     /** v1.8 hard drop shadow; null = off. */
     shadow: TextShadow | null;
+    /** v1.8 letter spacing in canvas px at the current effective size; 0 = default. */
+    letterSpacing: number;
   } | null;
 }
 
@@ -529,6 +533,11 @@ export function EditorClient({
                       offsetY: t.shadow.offsetY ?? 0,
                     }
                   : null,
+              // Fabric charSpacing is em/1000; px at the effective (scaled) size.
+              letterSpacing:
+                ((t.charSpacing ?? 0) / 1000) *
+                (t.fontSize ?? TEXT_DEFAULTS.fontSize) *
+                (designed.scaleY ?? 1),
             }
           : null;
       setSelection({
@@ -600,6 +609,8 @@ export function EditorClient({
         outline?: TextOutline;
         /** v1.8 hard drop shadow; never part of the measured box. */
         shadow?: TextShadow;
+        /** v1.8 letter spacing in canvas px (mapped to em-based charSpacing). */
+        letterSpacing?: number;
       },
     ): DesignedText => {
       const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
@@ -612,6 +623,10 @@ export function EditorClient({
         originX: 'center' as const,
         originY: 'center' as const,
         direction: resolveTextDirection(content, direction),
+        // px -> Fabric's em-based charSpacing (relative to the unscaled fontSize).
+        ...(props.letterSpacing
+          ? { charSpacing: (props.letterSpacing * 1000) / props.fontSize }
+          : {}),
         // Without an outline, strokeWidth is 0: Fabric's default (1) inflates
         // getScaledWidth() by 1px even with no stroke, which can flip a
         // boundary-tight Textbox line break across save/reopen cycles. With an
@@ -775,6 +790,7 @@ export function EditorClient({
               width: isBox ? saved.width : undefined,
               outline: saved.outline,
               shadow: saved.shadow,
+              letterSpacing: saved.letterSpacing,
             });
             const mine = areaKey === activeAreaKeyRef.current;
             itext.set({
@@ -789,8 +805,18 @@ export function EditorClient({
             // stored box, so validation sees exactly the saved rectangle even if
             // metrics drifted. A Textbox already has the exact stored width and a
             // self-consistent re-wrapped height; scaling it would change the wrap.
-            if (!isBox && itext.width && itext.height) {
-              itext.set({ scaleX: saved.width / itext.width, scaleY: saved.height / itext.height });
+            // Stroke-inclusive dims (getScaled* at scale 1), NOT width/height: the
+            // saved box includes the v1.8 outline stroke, the raw props do not;
+            // dividing mismatched boxes inflated outlined text ~11% per reopen.
+            if (!isBox) {
+              const naturalWidth = itext.getScaledWidth();
+              const naturalHeight = itext.getScaledHeight();
+              if (naturalWidth && naturalHeight) {
+                itext.set({
+                  scaleX: saved.width / naturalWidth,
+                  scaleY: saved.height / naturalHeight,
+                });
+              }
             }
             itext.setCoords();
             canvas.add(itext);
@@ -1237,6 +1263,8 @@ export function EditorClient({
                 offsetY: t.shadow.offsetY ?? 0,
               }
             : undefined,
+        letterSpacing:
+          ((t.charSpacing ?? 0) / 1000) * bakedSize || undefined,
       });
       replacement.set({ left: t.left, top: t.top, angle: t.angle });
       canvas.remove(t);
@@ -1292,6 +1320,14 @@ export function EditorClient({
                 offsetY: shadowOffsetY,
               }
             : undefined;
+        // em-based charSpacing -> contract px at the baked size; 0 = field omitted.
+        const letterSpacing = Math.min(
+          Math.max(
+            ((t.charSpacing ?? 0) / 1000) * (t.fontSize ?? TEXT_DEFAULTS.fontSize) * scale,
+            LETTER_SPACING_MIN,
+          ),
+          LETTER_SPACING_MAX,
+        );
         serialized = {
           type: 'text',
           text: (t.text ?? '').replace(/\r\n?/g, '\n'),
@@ -1310,6 +1346,7 @@ export function EditorClient({
           ...(isBox ? { wrappedLines: [...t.textLines] } : {}),
           ...(outline ? { outline } : {}),
           ...(shadow ? { shadow } : {}),
+          ...(letterSpacing !== 0 ? { letterSpacing } : {}),
           x: t.left ?? 0,
           y: t.top ?? 0,
           width: t.getScaledWidth(),
@@ -1594,6 +1631,26 @@ export function EditorClient({
                 updateActiveText((t) => {
                   // Reset any interactive scale so the typed size IS the size.
                   t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
+                });
+              }}
+            />
+          </label>
+          <label className="text-panel__field">
+            Letter spacing
+            <input
+              type="number"
+              data-testid="text-letter-spacing-input"
+              min={LETTER_SPACING_MIN}
+              max={LETTER_SPACING_MAX}
+              value={Math.round(selection.text.letterSpacing)}
+              onChange={(e) => {
+                const px = Number(e.target.value);
+                if (!Number.isFinite(px)) return;
+                const clamped = Math.min(Math.max(px, LETTER_SPACING_MIN), LETTER_SPACING_MAX);
+                updateActiveText((t) => {
+                  // Target px at the current effective size -> em-based charSpacing.
+                  const effective = (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1);
+                  t.set({ charSpacing: (clamped * 1000) / effective });
                 });
               }}
             />

@@ -17,11 +17,11 @@ export default defineConfig({
   globalSetup: './e2e/global-setup.ts',
   timeout: 120_000,
   expect: { timeout: 15_000 },
-  // The roaming one-test 120s stall reproduces even on production servers
-  // (one render-heavy spec per run, always green on retry in ~2s), so the
-  // cause is NOT dev-mode compilation; current suspect is render contention
-  // in the API during the marathon. Retries stay at 2 until that is found;
-  // a real regression still fails every attempt.
+  // The roaming one-test 120s stall was the API's first text raster paying the
+  // Pango/fontconfig cold start mid-spec; the API now warms that path at boot
+  // before it reports ready (apps/api/src/warmup.ts), so the cost lands in the
+  // webServer readiness wait, not a test timeout. Retries stay at 2 as a safety
+  // net for any residual flake; a real regression still fails every attempt.
   retries: CI ? 2 : 0,
   // One worker: the design-library spec wipes the design_projects table for its
   // empty-state assertion, which must never race another spec mid-flow.

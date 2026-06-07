@@ -74,6 +74,15 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
           <dd>{design.id}</dd>
           <dt>Template</dt>
           <dd>{design.templateSlug}</dd>
+          {design.color && (
+            <>
+              <dt>Color</dt>
+              <dd data-testid="design-color">
+                <i className="chip__swatch" style={{ background: design.color.hex }} />
+                {design.color.name}
+              </dd>
+            </>
+          )}
           <dt>Print areas</dt>
           <dd>{placedAreas}</dd>
           <dt>Objects</dt>

@@ -30,6 +30,7 @@ export {
   removeFlatBackground,
   type RemoveBackgroundResult,
 } from './remove-background';
+export { recolorGarment, type RecolorGarmentOptions } from './recolor-garment';
 
 /** Defensive cap against pixel bombs reaching libvips. */
 const MAX_INPUT_PIXELS = 50_000_000;

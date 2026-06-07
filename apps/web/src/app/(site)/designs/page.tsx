@@ -102,6 +102,12 @@ export default async function DesignLibraryPage({
                     updated {new Date(item.updatedAt).toLocaleString()}
                   </p>
                   <p className="design-card__chips" data-testid="design-card-areas">
+                    {item.color && (
+                      <span className="chip chip--color" data-testid="design-card-color">
+                        <i className="chip__swatch" style={{ background: item.color.hex }} />
+                        {item.color.name}
+                      </span>
+                    )}
                     {item.placements.length > 0 ? (
                       item.placements.map((placement) => (
                         <span className="chip" key={placement.printAreaKey}>

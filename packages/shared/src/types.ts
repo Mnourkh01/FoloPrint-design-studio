@@ -166,6 +166,12 @@ export interface StoredDesignPlacement {
 export interface DesignDocument {
   version: 2;
   templateId: string;
+  /**
+   * Chosen garment color (TemplateColor key, v2.0). Preview-time choice only:
+   * it never affects placement geometry or validation. Absent = the template's
+   * default color (pre-v2.0 documents persist byte-identical).
+   */
+  colorKey?: string;
   placements: DesignPlacement[];
 }
 
@@ -181,6 +187,7 @@ export interface DesignDocumentV1 {
 export interface StoredDesignDocumentV2 {
   version: 2;
   templateId: string;
+  colorKey?: string;
   placements: StoredDesignPlacement[];
 }
 
@@ -227,6 +234,35 @@ export interface PrintAreaDto {
   heightInches: number | null;
 }
 
+/** Color-specific view images for one print area that carries its own view (e.g. back). */
+export interface TemplateColorAreaImageDto {
+  printAreaKey: string;
+  /** Relative API URL streaming this area's blank in this color. */
+  imageUrl: string;
+  thumbUrl: string;
+}
+
+/**
+ * One garment color of a template (v2.0). The blank photo is color-specific;
+ * the garment mask and the fabric overlay are shared across colors (same photo
+ * geometry). Color is a preview-time choice: it never affects print areas,
+ * placement geometry, or validation.
+ */
+export interface TemplateColorDto {
+  /** Stable key used in URLs and design documents ('white', 'black', ...). */
+  key: string;
+  name: string;
+  /** Swatch color for the picker UI (strict #RRGGBB). */
+  hex: string;
+  /** Exactly one default per template; designs without a colorKey render in it. */
+  isDefault: boolean;
+  /** Relative API URL streaming the template-level (front) blank in this color. */
+  imageUrl: string;
+  thumbUrl: string;
+  /** One entry per print area that carries its own view (mirrors PrintAreaDto.imageUrl). */
+  areaImages: TemplateColorAreaImageDto[];
+}
+
 export interface ProductTemplateDto {
   id: string;
   name: string;
@@ -242,6 +278,11 @@ export interface ProductTemplateDto {
   /** How overlays composite over the artwork ('over' unless the template says otherwise). */
   overlayBlend: OverlayBlend;
   printAreas: PrintAreaDto[];
+  /**
+   * Garment colors in display order; empty for templates without color variants.
+   * The default color's images are the template-level images.
+   */
+  colors: TemplateColorDto[];
 }
 
 export interface UploadedAssetDto {
@@ -264,6 +305,19 @@ export interface DesignPreviewDto {
   renderedAt: string;
 }
 
+/**
+ * The garment color a design resolves to, for display surfaces (library rows,
+ * mockup page). Resolved server-side the same way render resolves it: the
+ * stored colorKey when it still exists on the template, else the template
+ * default; null when the template has no colors.
+ */
+export interface DesignColorDto {
+  key: string;
+  name: string;
+  /** Swatch color, strict #RRGGBB. */
+  hex: string;
+}
+
 /** Advisory print-quality level for a placed image object. */
 export type PrintQualityLevel = 'ok' | 'warning' | 'poor';
 
@@ -284,6 +338,8 @@ export interface DesignProjectDto {
   templateSlug: string;
   /** Always normalized to the current document version (v2). */
   design: DesignDocument;
+  /** Resolved garment color for display; null when the template has no colors. */
+  color: DesignColorDto | null;
   /** One entry per rendered area; empty until the design is rendered. */
   previews: DesignPreviewDto[];
   /**
@@ -328,6 +384,11 @@ export interface DesignListItemDto {
   };
   /** Ordered by the template's area sortOrder (front before back). */
   placements: DesignPlacementSummaryDto[];
+  /**
+   * Resolved garment color for the row swatch; null when the template has no
+   * colors. An unreadable document degrades to the template default.
+   */
+  color: DesignColorDto | null;
   /** Same shape and ordering as DesignProjectDto.previews; empty until rendered. */
   previews: DesignPreviewDto[];
   /**

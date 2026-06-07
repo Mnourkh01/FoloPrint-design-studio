@@ -285,6 +285,33 @@ function ensureEditorFonts(): Promise<void> {
   return fontsLoadedPromise;
 }
 
+/**
+ * Plain HTMLImageElement loader for the overview tiles (the Fabric view-image
+ * cache holds FabricImages with canvas-fit scaling baked in; the tiles draw to
+ * their own 2D contexts and want the raw bitmap). Cached per URL for the page.
+ */
+const htmlImageCache = new Map<string, Promise<HTMLImageElement>>();
+function loadHtmlImage(url: string): Promise<HTMLImageElement> {
+  let promise = htmlImageCache.get(url);
+  if (!promise) {
+    promise = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => {
+        htmlImageCache.delete(url); // allow a retry on the next open
+        reject(new Error(`Failed to load ${url}`));
+      };
+      img.src = url;
+    });
+    htmlImageCache.set(url, promise);
+  }
+  return promise;
+}
+
+/** Overview tile raster width in CSS px; height follows the template aspect. */
+const OVERVIEW_TILE_WIDTH = 260;
+
 /** Defaults for a freshly added text object. */
 const TEXT_DEFAULTS = { fontKey: 'inter', fontSize: 48, color: '#1a1a1a', align: 'center' as TextAlign };
 
@@ -423,6 +450,17 @@ export function EditorClient({
   const activeAreaKeyRef = useRef(activeAreaKey);
   activeAreaKeyRef.current = activeAreaKey;
 
+  /**
+   * Chosen garment color (v2.0). A stored key that no longer exists falls back to
+   * the default, mirroring the server's render rule. Preview-time only: swapping
+   * colors never touches object geometry, so it lives outside the undo stack.
+   */
+  const [colorKey, setColorKey] = useState<string>(() => {
+    const stored = initialDesign?.design.colorKey;
+    if (stored && template.colors.some((c) => c.key === stored)) return stored;
+    return template.colors.find((c) => c.isDefault)?.key ?? template.colors[0]?.key ?? '';
+  });
+
   /** Bumped once the canvas exists so area-dependent effects can run. */
   const [canvasReady, setCanvasReady] = useState(false);
 
@@ -452,6 +490,9 @@ export function EditorClient({
   /** View zoom multiplier over the fit zoom (1 = product fits the stage). */
   const [viewZoom, setViewZoom] = useState(1);
 
+  /** Placement overview (v2.0): grid of every print side with its current ink. */
+  const [overviewOpen, setOverviewOpen] = useState(false);
+
   /** Open contextual object tool (toolbar above the stage); null = toolbar only. */
   const [objectTool, setObjectTool] = useState<'transform' | 'position' | 'pattern' | null>(null);
 
@@ -463,10 +504,97 @@ export function EditorClient({
     [template.printAreas, activeAreaKey],
   );
 
+  const activeColor = useMemo(
+    () => template.colors.find((c) => c.key === colorKey),
+    [template.colors, colorKey],
+  );
+
+  /**
+   * Color-aware view image URLs for one area. Same precedence the server's render
+   * uses: the color's area-specific image, else the area's own (only when the area
+   * carries its own view), else the color's template-level blank, else the plain
+   * template image.
+   */
+  const viewImagesOf = useCallback(
+    (a: PrintAreaDto): { baseUrl: string; thumbUrl: string } => {
+      const colorArea = activeColor?.areaImages.find((img) => img.printAreaKey === a.key);
+      return {
+        baseUrl: colorArea?.imageUrl ?? a.imageUrl ?? activeColor?.imageUrl ?? template.imageUrl,
+        thumbUrl:
+          colorArea?.thumbUrl ??
+          a.thumbUrl ??
+          activeColor?.thumbUrl ??
+          template.thumbUrl ??
+          a.imageUrl ??
+          template.imageUrl,
+      };
+    },
+    [activeColor, template.imageUrl, template.thumbUrl],
+  );
+
   /** Canvas px per inch per area key, for the advisory DPI readout. */
   const ppiByKey = useMemo(
     () => new Map(template.printAreas.map((a) => [a.key, printAreaPpi(a)])),
     [template.printAreas],
+  );
+
+  /**
+   * Draws one overview tile: the area's garment view (in the chosen color), every
+   * designed object of that area rasterized at tile scale (pattern fills included,
+   * in canvas z-order), then the fabric overlay with the same blend the live
+   * canvas uses. Objects of inactive areas are hidden on the shared canvas, so
+   * each is made visible just for its own rasterization.
+   */
+  const drawAreaPreview = useCallback(
+    async (areaKey: string, el: HTMLCanvasElement): Promise<void> => {
+      const canvas = canvasRef.current;
+      const area = template.printAreas.find((a) => a.key === areaKey);
+      const ctx = el.getContext('2d');
+      if (!canvas || !area || !ctx) return;
+      const scale = el.width / template.canvasWidth;
+      ctx.clearRect(0, 0, el.width, el.height);
+
+      try {
+        const base = await loadHtmlImage(apiUrl(viewImagesOf(area).baseUrl));
+        ctx.drawImage(base, 0, 0, el.width, el.height);
+      } catch {
+        // Tile degrades to ink on a blank background.
+      }
+
+      for (const obj of canvas.getObjects()) {
+        const designed = obj as DesignedObject;
+        const preview = obj as PatternPreviewRect;
+        if (!(designed.kind || preview.patternPreview) || designed.printAreaKey !== areaKey) continue;
+        const wasVisible = obj.visible;
+        obj.visible = true;
+        try {
+          const raster = obj.toCanvasElement({ multiplier: scale });
+          // Center-anchored placement: raster padding (retina, stroke) stays symmetric
+          // around the object, so the centers line up even when the sizes differ.
+          const r = obj.getBoundingRect();
+          ctx.drawImage(
+            raster,
+            (r.left + r.width / 2) * scale - raster.width / 2,
+            (r.top + r.height / 2) * scale - raster.height / 2,
+          );
+        } finally {
+          obj.visible = wasVisible;
+        }
+      }
+
+      const overlayUrl = area.overlayUrl ?? template.overlayUrl;
+      if (overlayUrl) {
+        try {
+          const overlay = await loadHtmlImage(apiUrl(overlayUrl));
+          ctx.globalCompositeOperation = FABRIC_OVERLAY_BLEND[area.overlayBlend ?? template.overlayBlend];
+          ctx.drawImage(overlay, 0, 0, el.width, el.height);
+          ctx.globalCompositeOperation = 'source-over';
+        } catch {
+          // Overlay is decorative; ignore.
+        }
+      }
+    },
+    [template, viewImagesOf],
   );
 
   const designedObjects = useCallback((): DesignedObject[] => {
@@ -1390,10 +1518,11 @@ export function EditorClient({
     setSelection(null);
     canvas.requestRenderAll();
 
-    // View images: the area's own base/overlay, falling back to the template's.
-    const baseUrl = area.imageUrl ?? template.imageUrl;
-    const baseCacheKey = area.imageUrl ? area.key : '';
-    loadViewImage(baseCacheRef.current, baseCacheKey, baseUrl)
+    // View images: color-aware base (the chosen color's blank for this view) with
+    // the same fallback chain the server renders with; cached by URL so color and
+    // tab switches both reuse loaded images.
+    const { baseUrl } = viewImagesOf(area);
+    loadViewImage(baseCacheRef.current, baseUrl, baseUrl)
       .then((img) => {
         if (cancelled) return;
         canvas.backgroundImage = img;
@@ -1403,14 +1532,14 @@ export function EditorClient({
         if (!cancelled) setStatus({ tone: 'error', message: 'Could not load the template image.' });
       });
 
+    // Overlay (fabric shading) is color-independent: same geometry for every color.
     const overlayUrl = area.overlayUrl ?? template.overlayUrl;
     if (overlayUrl) {
-      const overlayCacheKey = area.overlayUrl ? area.key : '';
       // Blend follows the same area -> template fallback as the overlay asset. Set on
       // every activation: the cached template-level image is shared across areas
       // whose blends may differ.
       const blend = FABRIC_OVERLAY_BLEND[area.overlayBlend ?? template.overlayBlend];
-      loadViewImage(overlayCacheRef.current, overlayCacheKey, overlayUrl)
+      loadViewImage(overlayCacheRef.current, overlayUrl, overlayUrl)
         .then((img) => {
           if (cancelled) return;
           img.set({ globalCompositeOperation: blend });
@@ -1428,7 +1557,7 @@ export function EditorClient({
     return () => {
       cancelled = true;
     };
-  }, [canvasReady, activeAreaKey, template, designedObjects, loadViewImage]);
+  }, [canvasReady, activeAreaKey, template, designedObjects, loadViewImage, viewImagesOf]);
 
   const handleUpload = async (file: File) => {
     const canvas = canvasRef.current;
@@ -2279,6 +2408,39 @@ export function EditorClient({
     return notes;
   }, [designedObjects, qualityOf, areaName]);
 
+  /** Swaps the garment color; a saved design needs a re-save (and re-render) to keep it. */
+  const handleColorChange = (key: string) => {
+    if (key === colorKey) return;
+    setColorKey(key);
+    if (designId) setDirty(true);
+  };
+
+  /**
+   * Opens the placement overview. The tiles snapshot the canvas state, so any
+   * in-flight interaction is settled first: a crop is abandoned (same rule as
+   * switching sides) and the selection chrome is dropped.
+   */
+  const openOverview = () => {
+    cancelCropRef.current();
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+    }
+    setSelection(null);
+    setOverviewOpen(true);
+  };
+
+  // Escape closes the overview (listener exists only while it is open).
+  useEffect(() => {
+    if (!overviewOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOverviewOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [overviewOpen]);
+
   const handleSave = async () => {
     const placements = collectPlacements();
     if (placements.length === 0) {
@@ -2319,7 +2481,12 @@ export function EditorClient({
     setBusy('save');
     setStatus({ tone: 'info', message: designId ? 'Updating design...' : 'Saving design...' });
     try {
-      const payload = { templateId: template.id, placements };
+      const payload = {
+        templateId: template.id,
+        // Only sent when the template has colors; the server validates the key.
+        ...(colorKey ? { colorKey } : {}),
+        placements,
+      };
       if (designId) {
         await updateDesign(designId, payload);
         setDirty(false);
@@ -2919,7 +3086,12 @@ export function EditorClient({
               <p className="studio__panel-title">Product</p>
               <div className="studio__panel-product">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(template.thumbUrl ?? template.imageUrl)} alt={template.name} width={56} height={56} />
+                <img
+                  src={apiUrl(activeColor?.thumbUrl ?? template.thumbUrl ?? template.imageUrl)}
+                  alt={template.name}
+                  width={56}
+                  height={56}
+                />
                 <div>
                   <b>{template.name}</b>
                   <span>
@@ -2927,6 +3099,31 @@ export function EditorClient({
                   </span>
                 </div>
               </div>
+              {template.colors.length > 0 && (
+                <div className="studio__panel-section">
+                  <p className="studio__panel-title">Color</p>
+                  <div className="studio__swatches" role="radiogroup" aria-label="Garment color">
+                    {template.colors.map((c) => (
+                      <button
+                        key={c.key}
+                        type="button"
+                        role="radio"
+                        aria-checked={c.key === colorKey}
+                        aria-label={c.name}
+                        title={c.name}
+                        className={c.key === colorKey ? 'swatch swatch--active' : 'swatch'}
+                        data-testid={`color-swatch-${c.key}`}
+                        onClick={() => handleColorChange(c.key)}
+                      >
+                        <span className="swatch__chip" style={{ background: c.hex }} />
+                      </button>
+                    ))}
+                  </div>
+                  <p className="studio__panel-copy" data-testid="active-color-name">
+                    {activeColor?.name ?? ''}
+                  </p>
+                </div>
+              )}
               <div className="studio__panel-section">
                 <p className="studio__panel-title">Print sides</p>
                 <ul className="studio__area-list">
@@ -3350,12 +3547,28 @@ export function EditorClient({
             >
               <span className="area-tab__thumb">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(a.thumbUrl ?? template.thumbUrl ?? a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
+                <img src={apiUrl(viewImagesOf(a).thumbUrl)} alt="" width={46} height={46} />
               </span>
               {a.name}
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}
             </button>
           ))}
+          {template.printAreas.length > 1 && (
+            <button
+              type="button"
+              className="area-tab area-tab--overview"
+              data-testid="overview-button"
+              onClick={openOverview}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+                <rect x="3" y="3" width="7" height="7" rx="1" />
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <rect x="3" y="14" width="7" height="7" rx="1" />
+                <rect x="14" y="14" width="7" height="7" rx="1" />
+              </svg>
+              Overview
+            </button>
+          )}
         </div>
         <p className="studio__bottom-meta">
           {totalObjects} object{totalObjects === 1 ? '' : 's'} across {placedAreas || 'no'} side
@@ -3383,6 +3596,69 @@ export function EditorClient({
           </button>
         </div>
       </footer>
+
+      {overviewOpen && (
+        <div
+          className="overview"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Placement overview"
+          data-testid="overview-modal"
+          onClick={() => setOverviewOpen(false)}
+        >
+          <div className="overview__sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="overview__head">
+              <p>All placements</p>
+              <button
+                type="button"
+                className="overview__close"
+                aria-label="Close overview"
+                data-testid="overview-close"
+                onClick={() => setOverviewOpen(false)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="overview__grid">
+              {template.printAreas.map((a) => (
+                <button
+                  key={a.key}
+                  type="button"
+                  className={
+                    a.key === activeAreaKey ? 'overview__tile overview__tile--active' : 'overview__tile'
+                  }
+                  data-testid={`overview-tile-${a.key}`}
+                  onClick={() => {
+                    setActiveAreaKey(a.key);
+                    setOverviewOpen(false);
+                  }}
+                >
+                  <canvas
+                    ref={(el) => {
+                      if (el) void drawAreaPreview(a.key, el);
+                    }}
+                    width={OVERVIEW_TILE_WIDTH}
+                    height={Math.round(
+                      (OVERVIEW_TILE_WIDTH * template.canvasHeight) / template.canvasWidth,
+                    )}
+                  />
+                  <span className="overview__name">
+                    {a.name}
+                    {areaCounts[a.key] ? (
+                      <span className="area-tab__count">{areaCounts[a.key]}</span>
+                    ) : (
+                      <span className="overview__empty">empty</span>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="overview__hint">Click a side to jump to it.</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

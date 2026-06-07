@@ -1,9 +1,26 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { PrintArea, ProductTemplate } from '@prisma/client';
+import type { Prisma, PrintArea, ProductTemplate, TemplateColor, TemplateColorAreaImage } from '@prisma/client';
 import type { OverlayBlend, ProductTemplateDto } from '@foloprint/shared';
 import { PrismaService } from '../prisma/prisma.service';
 
-type TemplateWithAreas = ProductTemplate & { printAreas: PrintArea[] };
+type ColorWithAreaImages = TemplateColor & { areaImages: TemplateColorAreaImage[] };
+type TemplateWithAreas = ProductTemplate & {
+  printAreas: PrintArea[];
+  colors: ColorWithAreaImages[];
+};
+
+/** Shared include shape so list/detail/internal lookups all hydrate identically. */
+const TEMPLATE_INCLUDE = {
+  printAreas: {
+    where: { active: true },
+    orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }],
+  },
+  colors: {
+    where: { active: true },
+    orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }],
+    include: { areaImages: true },
+  },
+} satisfies Prisma.ProductTemplateInclude;
 
 @Injectable()
 export class TemplatesService {
@@ -12,9 +29,7 @@ export class TemplatesService {
   async findAllActive(): Promise<ProductTemplateDto[]> {
     const templates = await this.prisma.productTemplate.findMany({
       where: { active: true },
-      include: {
-        printAreas: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }] },
-      },
+      include: TEMPLATE_INCLUDE,
       orderBy: { createdAt: 'asc' },
     });
     return templates.map((t) => this.toDto(t));
@@ -29,9 +44,7 @@ export class TemplatesService {
   async findEntityBySlug(slug: string): Promise<TemplateWithAreas> {
     const template = await this.prisma.productTemplate.findFirst({
       where: { slug, active: true },
-      include: {
-        printAreas: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }] },
-      },
+      include: TEMPLATE_INCLUDE,
     });
     if (!template) {
       throw new NotFoundException(`Template "${slug}" not found`);
@@ -76,6 +89,29 @@ export class TemplatesService {
           : null,
         overlayBlend: area.overlayBlend as OverlayBlend | null,
       })),
+      colors: template.colors.map((color) => {
+        const colorBase = `/templates/${template.slug}/colors/${encodeURIComponent(color.key)}`;
+        const keyOfAreaId = new Map(template.printAreas.map((a) => [a.id, a.key]));
+        return {
+          key: color.key,
+          name: color.name,
+          hex: color.hex,
+          isDefault: color.isDefault,
+          imageUrl: `${colorBase}/image`,
+          thumbUrl: `${colorBase}/thumb`,
+          areaImages: color.areaImages
+            // An image whose print area went inactive has no key to address it by.
+            .filter((img) => keyOfAreaId.has(img.printAreaId))
+            .map((img) => {
+              const areaKey = keyOfAreaId.get(img.printAreaId)!;
+              return {
+                printAreaKey: areaKey,
+                imageUrl: `${colorBase}/areas/${encodeURIComponent(areaKey)}/image`,
+                thumbUrl: `${colorBase}/areas/${encodeURIComponent(areaKey)}/thumb`,
+              };
+            }),
+        };
+      }),
     };
   }
 }

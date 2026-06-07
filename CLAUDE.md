@@ -44,6 +44,19 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   the editor mirrors the blend with a canvas composite op so live view matches the server
   render. Source blanks + the derivation script live in `apps/api/prisma/assets/`; the seed
   copies them into storage.
+- Color variants (v2.0): templates carry `TemplateColor` rows (key/name/hex, one
+  default) with per-color blank + thumb, plus `TemplateColorAreaImage` rows for areas
+  that own their view (back). Only the BLANK is color-specific; mask + overlay are
+  color-independent (same photo geometry). Non-default blanks are DERIVED AT SEED TIME
+  from the white blank + mask (`recolorGarment` in the renderer: luma-normalized tint,
+  shade floor + sheen keep folds on dark colors, deterministic noise = heather); no
+  extra photo binaries in the repo. Files stream via
+  `/templates/:slug/colors/:key/image|thumb` and `.../colors/:key/areas/:areaKey/...`.
+  The design document stores an optional `colorKey` (preview-time only, never affects
+  geometry/validation; absent = default color, pre-v2.0 docs persist byte-identical);
+  the server validates it on save and falls back to the default at render if the key
+  vanished. Editor: swatch picker in the Product panel, color swaps live outside the
+  undo stack, view-image cache keyed by URL.
 - Pattern tiling (v1.9): optional `pattern` ({type grid|mirror|half-drop, spacing 0..100})
   on image objects; the object's box is the BASE TILE and the fill covers the whole print
   area (clipped to it), phase anchored to the tile position. Patterned objects must have

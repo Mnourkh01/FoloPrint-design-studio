@@ -10,12 +10,15 @@
  * view). The front area keeps null image paths on purpose so the template-level
  * fallback path stays exercised.
  *
- * The overlay carries the photo's fabric shading normalized to the garment white
- * point, so it composites with 'multiply' (re-applies folds over the printed ink);
- * the mask clips ink to the garment silhouette.
+ * The overlay carries the photo's fold TEXTURE only (high-pass shading, faded to
+ * neutral near the silhouette), so it composites with 'multiply' (re-applies folds
+ * over the printed ink without re-darkening broad shadows); the mask clips ink to
+ * the garment silhouette.
  */
 import { PrismaClient } from '@prisma/client';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { recolorGarment } from '@foloprint/renderer';
+import sharp from 'sharp';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const prisma = new PrismaClient();
@@ -42,6 +45,29 @@ interface TemplateSpec {
   areas: AreaSpec[];
 }
 
+interface ColorSpec {
+  key: string;
+  name: string;
+  /** Swatch hex AND the recolor target for derived blanks. */
+  hex: string;
+  /** Heather speckle amplitude for recolorGarment; 0/absent = smooth fabric. */
+  noise?: number;
+  isDefault?: boolean;
+}
+
+/**
+ * Garment colors (v2.0). The default color IS the checked-in white blank; every
+ * other color is derived from it at seed time (recolorGarment: white blank +
+ * garment mask -> tinted blank), so no extra photo binaries live in the repo.
+ * The mask and the multiply overlay stay color-independent: they carry the
+ * photo's geometry and shading, which the recolor preserves.
+ */
+const COLORS: ColorSpec[] = [
+  { key: 'white', name: 'White', hex: '#f2f2f0', isDefault: true },
+  { key: 'black', name: 'Black', hex: '#232227' },
+  { key: 'heather', name: 'Heather Gray', hex: '#a7a7a3', noise: 0.11 },
+];
+
 /**
  * Print areas sit on the chest / upper back of each photographed garment,
  * measured from its mask bbox (build-assets.js prints it): a 12 inch print
@@ -66,6 +92,23 @@ const TEMPLATES: TemplateSpec[] = [
       // Garment bbox ~x 174..1082, centerline x 628; uniform 35 px/in.
       { key: 'front', name: 'Front print', x: 418, y: 380, width: 420, height: 525, widthInches: 12, heightInches: 15, sortOrder: 0, ownImages: false },
       { key: 'back', name: 'Back print', x: 418, y: 340, width: 420, height: 560, widthInches: 12, heightInches: 16, sortOrder: 1, ownImages: true },
+    ],
+  },
+  {
+    // Assets derived with lumaThreshold 170 (not the default 200): the photo's
+    // backdrop sits at luma ~133-159 while seam shadows on the garment reach
+    // ~180, so 200 let the flood fill creep through the rib seams and drop the
+    // cuffs/hem as separate components.
+    slug: 'classic-hoodie',
+    name: 'Classic Hoodie',
+    canvas: 1254,
+    areas: [
+      // Garment bbox ~x 226..1028, centerline x 627; ~31.7 px/in. The front
+      // print zone is short on purpose: hood drape ends ~y 455 and the kangaroo
+      // pocket seam starts ~y 720 (both measured from the photo's luma dips).
+      { key: 'front', name: 'Front print', x: 437, y: 465, width: 380, height: 240, widthInches: 12, heightInches: 7.6, sortOrder: 0, ownImages: false },
+      // Back runs from below the hood drape (~y 390) to the hem ribbing (~y 1010).
+      { key: 'back', name: 'Back print', x: 437, y: 450, width: 380, height: 510, widthInches: 12, heightInches: 16.1, sortOrder: 1, ownImages: true },
     ],
   },
 ];
@@ -109,6 +152,7 @@ async function seedTemplate(storageRoot: string, spec: TemplateSpec): Promise<vo
     },
   });
 
+  const areaRows = new Map<string, { id: string; ownImages: boolean }>();
   for (const area of spec.areas) {
     const side = area.ownImages ? ('back' as const) : null;
     const areaSpec = {
@@ -127,14 +171,90 @@ async function seedTemplate(storageRoot: string, spec: TemplateSpec): Promise<vo
       thumbImagePath: side ? path(side, '-thumb') : null,
       overlayBlend: null, // template-level blend applies
     };
-    await prisma.printArea.upsert({
+    const row = await prisma.printArea.upsert({
       where: { productTemplateId_key: { productTemplateId: template.id, key: area.key } },
       create: { productTemplateId: template.id, key: area.key, ...areaSpec },
       update: areaSpec,
     });
+    areaRows.set(area.key, { id: row.id, ownImages: area.ownImages });
   }
 
-  console.log(`Seeded template "${spec.name}" (${spec.slug}) with ${spec.areas.length} print areas.`);
+  await seedColors(storageRoot, spec, template.id, areaRows);
+
+  console.log(
+    `Seeded template "${spec.name}" (${spec.slug}) with ${spec.areas.length} print areas and ${COLORS.length} colors.`,
+  );
+}
+
+/**
+ * Upserts the color rows and derives the non-default blanks from the white
+ * photo + mask already copied into storage. Sides: 'front' backs the
+ * template-level images, 'back' backs each ownImages area. Derived files land
+ * next to the originals as templates/<slug>-<colorKey>-<side>[-thumb].png.
+ */
+async function seedColors(
+  storageRoot: string,
+  spec: TemplateSpec,
+  templateId: string,
+  areaRows: Map<string, { id: string; ownImages: boolean }>,
+): Promise<void> {
+  const storagePath = (side: 'front' | 'back', color?: string, suffix = '') =>
+    `templates/${spec.slug}${color ? `-${color}` : ''}-${side}${suffix}.png`;
+
+  // Derive each non-default color's blank + thumb per side, from storage files.
+  const sides: ('front' | 'back')[] = ['front', 'back'];
+  for (const color of COLORS) {
+    if (color.isDefault) continue;
+    for (const side of sides) {
+      const source = await readFile(join(storageRoot, storagePath(side)));
+      const mask = await readFile(join(storageRoot, storagePath(side, undefined, '-mask')));
+      const blank = await recolorGarment({ source, mask, hex: color.hex, noise: color.noise ?? 0 });
+      await writeFile(join(storageRoot, storagePath(side, color.key)), blank);
+      await writeFile(
+        join(storageRoot, storagePath(side, color.key, '-thumb')),
+        await sharp(blank).resize(512, 512).png().toBuffer(),
+      );
+    }
+  }
+
+  // Stale colors from an older seed spec (and their area images, via cascade) go away.
+  await prisma.templateColor.deleteMany({
+    where: { productTemplateId: templateId, key: { notIn: COLORS.map((c) => c.key) } },
+  });
+
+  for (const [sortOrder, color] of COLORS.entries()) {
+    // The default color points at the template's own files; derived colors at theirs.
+    const colorOf = color.isDefault ? undefined : color.key;
+    const colorSpec = {
+      name: color.name,
+      hex: color.hex,
+      isDefault: color.isDefault ?? false,
+      sortOrder,
+      active: true,
+      baseImagePath: storagePath('front', colorOf),
+      thumbImagePath: storagePath('front', colorOf, '-thumb'),
+    };
+    const colorRow = await prisma.templateColor.upsert({
+      where: { productTemplateId_key: { productTemplateId: templateId, key: color.key } },
+      create: { productTemplateId: templateId, key: color.key, ...colorSpec },
+      update: colorSpec,
+    });
+
+    for (const area of areaRows.values()) {
+      if (!area.ownImages) continue; // the area uses the template-level (front) images
+      const areaImageSpec = {
+        baseImagePath: storagePath('back', colorOf),
+        thumbImagePath: storagePath('back', colorOf, '-thumb'),
+      };
+      await prisma.templateColorAreaImage.upsert({
+        where: {
+          templateColorId_printAreaId: { templateColorId: colorRow.id, printAreaId: area.id },
+        },
+        create: { templateColorId: colorRow.id, printAreaId: area.id, ...areaImageSpec },
+        update: areaImageSpec,
+      });
+    }
+  }
 }
 
 async function main(): Promise<void> {

@@ -285,6 +285,33 @@ function ensureEditorFonts(): Promise<void> {
   return fontsLoadedPromise;
 }
 
+/**
+ * Plain HTMLImageElement loader for the overview tiles (the Fabric view-image
+ * cache holds FabricImages with canvas-fit scaling baked in; the tiles draw to
+ * their own 2D contexts and want the raw bitmap). Cached per URL for the page.
+ */
+const htmlImageCache = new Map<string, Promise<HTMLImageElement>>();
+function loadHtmlImage(url: string): Promise<HTMLImageElement> {
+  let promise = htmlImageCache.get(url);
+  if (!promise) {
+    promise = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => {
+        htmlImageCache.delete(url); // allow a retry on the next open
+        reject(new Error(`Failed to load ${url}`));
+      };
+      img.src = url;
+    });
+    htmlImageCache.set(url, promise);
+  }
+  return promise;
+}
+
+/** Overview tile raster width in CSS px; height follows the template aspect. */
+const OVERVIEW_TILE_WIDTH = 260;
+
 /** Defaults for a freshly added text object. */
 const TEXT_DEFAULTS = { fontKey: 'inter', fontSize: 48, color: '#1a1a1a', align: 'center' as TextAlign };
 
@@ -463,6 +490,9 @@ export function EditorClient({
   /** View zoom multiplier over the fit zoom (1 = product fits the stage). */
   const [viewZoom, setViewZoom] = useState(1);
 
+  /** Placement overview (v2.0): grid of every print side with its current ink. */
+  const [overviewOpen, setOverviewOpen] = useState(false);
+
   /** Open contextual object tool (toolbar above the stage); null = toolbar only. */
   const [objectTool, setObjectTool] = useState<'transform' | 'position' | 'pattern' | null>(null);
 
@@ -506,6 +536,65 @@ export function EditorClient({
   const ppiByKey = useMemo(
     () => new Map(template.printAreas.map((a) => [a.key, printAreaPpi(a)])),
     [template.printAreas],
+  );
+
+  /**
+   * Draws one overview tile: the area's garment view (in the chosen color), every
+   * designed object of that area rasterized at tile scale (pattern fills included,
+   * in canvas z-order), then the fabric overlay with the same blend the live
+   * canvas uses. Objects of inactive areas are hidden on the shared canvas, so
+   * each is made visible just for its own rasterization.
+   */
+  const drawAreaPreview = useCallback(
+    async (areaKey: string, el: HTMLCanvasElement): Promise<void> => {
+      const canvas = canvasRef.current;
+      const area = template.printAreas.find((a) => a.key === areaKey);
+      const ctx = el.getContext('2d');
+      if (!canvas || !area || !ctx) return;
+      const scale = el.width / template.canvasWidth;
+      ctx.clearRect(0, 0, el.width, el.height);
+
+      try {
+        const base = await loadHtmlImage(apiUrl(viewImagesOf(area).baseUrl));
+        ctx.drawImage(base, 0, 0, el.width, el.height);
+      } catch {
+        // Tile degrades to ink on a blank background.
+      }
+
+      for (const obj of canvas.getObjects()) {
+        const designed = obj as DesignedObject;
+        const preview = obj as PatternPreviewRect;
+        if (!(designed.kind || preview.patternPreview) || designed.printAreaKey !== areaKey) continue;
+        const wasVisible = obj.visible;
+        obj.visible = true;
+        try {
+          const raster = obj.toCanvasElement({ multiplier: scale });
+          // Center-anchored placement: raster padding (retina, stroke) stays symmetric
+          // around the object, so the centers line up even when the sizes differ.
+          const r = obj.getBoundingRect();
+          ctx.drawImage(
+            raster,
+            (r.left + r.width / 2) * scale - raster.width / 2,
+            (r.top + r.height / 2) * scale - raster.height / 2,
+          );
+        } finally {
+          obj.visible = wasVisible;
+        }
+      }
+
+      const overlayUrl = area.overlayUrl ?? template.overlayUrl;
+      if (overlayUrl) {
+        try {
+          const overlay = await loadHtmlImage(apiUrl(overlayUrl));
+          ctx.globalCompositeOperation = FABRIC_OVERLAY_BLEND[area.overlayBlend ?? template.overlayBlend];
+          ctx.drawImage(overlay, 0, 0, el.width, el.height);
+          ctx.globalCompositeOperation = 'source-over';
+        } catch {
+          // Overlay is decorative; ignore.
+        }
+      }
+    },
+    [template, viewImagesOf],
   );
 
   const designedObjects = useCallback((): DesignedObject[] => {
@@ -2326,6 +2415,32 @@ export function EditorClient({
     if (designId) setDirty(true);
   };
 
+  /**
+   * Opens the placement overview. The tiles snapshot the canvas state, so any
+   * in-flight interaction is settled first: a crop is abandoned (same rule as
+   * switching sides) and the selection chrome is dropped.
+   */
+  const openOverview = () => {
+    cancelCropRef.current();
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+    }
+    setSelection(null);
+    setOverviewOpen(true);
+  };
+
+  // Escape closes the overview (listener exists only while it is open).
+  useEffect(() => {
+    if (!overviewOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOverviewOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [overviewOpen]);
+
   const handleSave = async () => {
     const placements = collectPlacements();
     if (placements.length === 0) {
@@ -3438,6 +3553,22 @@ export function EditorClient({
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}
             </button>
           ))}
+          {template.printAreas.length > 1 && (
+            <button
+              type="button"
+              className="area-tab area-tab--overview"
+              data-testid="overview-button"
+              onClick={openOverview}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+                <rect x="3" y="3" width="7" height="7" rx="1" />
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <rect x="3" y="14" width="7" height="7" rx="1" />
+                <rect x="14" y="14" width="7" height="7" rx="1" />
+              </svg>
+              Overview
+            </button>
+          )}
         </div>
         <p className="studio__bottom-meta">
           {totalObjects} object{totalObjects === 1 ? '' : 's'} across {placedAreas || 'no'} side
@@ -3465,6 +3596,69 @@ export function EditorClient({
           </button>
         </div>
       </footer>
+
+      {overviewOpen && (
+        <div
+          className="overview"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Placement overview"
+          data-testid="overview-modal"
+          onClick={() => setOverviewOpen(false)}
+        >
+          <div className="overview__sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="overview__head">
+              <p>All placements</p>
+              <button
+                type="button"
+                className="overview__close"
+                aria-label="Close overview"
+                data-testid="overview-close"
+                onClick={() => setOverviewOpen(false)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="overview__grid">
+              {template.printAreas.map((a) => (
+                <button
+                  key={a.key}
+                  type="button"
+                  className={
+                    a.key === activeAreaKey ? 'overview__tile overview__tile--active' : 'overview__tile'
+                  }
+                  data-testid={`overview-tile-${a.key}`}
+                  onClick={() => {
+                    setActiveAreaKey(a.key);
+                    setOverviewOpen(false);
+                  }}
+                >
+                  <canvas
+                    ref={(el) => {
+                      if (el) void drawAreaPreview(a.key, el);
+                    }}
+                    width={OVERVIEW_TILE_WIDTH}
+                    height={Math.round(
+                      (OVERVIEW_TILE_WIDTH * template.canvasHeight) / template.canvasWidth,
+                    )}
+                  />
+                  <span className="overview__name">
+                    {a.name}
+                    {areaCounts[a.key] ? (
+                      <span className="area-tab__count">{areaCounts[a.key]}</span>
+                    ) : (
+                      <span className="overview__empty">empty</span>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="overview__hint">Click a side to jump to it.</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

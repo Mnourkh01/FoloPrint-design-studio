@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { apiUrl, fetchDesign, fetchTemplate } from '@/lib/api';
 import type { ProductTemplateDto } from '@foloprint/shared';
 import { RenderButton } from './render-button';
+import { DownloadMockupButton } from './download-mockup-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +51,12 @@ export default async function DesignPage({ params }: { params: Promise<{ id: str
                 src={`${apiUrl(preview.previewUrl)}?t=${Date.parse(preview.renderedAt)}`}
                 alt={`Rendered ${areaName(preview.printAreaKey)} mockup`}
                 data-testid={`preview-image-${preview.printAreaKey}`}
+              />
+              <DownloadMockupButton
+                previewUrl={preview.previewUrl}
+                designId={design.id}
+                areaKey={preview.printAreaKey}
+                cacheBust={String(Date.parse(preview.renderedAt))}
               />
             </div>
           ))

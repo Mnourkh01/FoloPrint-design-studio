@@ -375,6 +375,9 @@ export function EditorClient({
   /** True when ANY area differs from what the server has for designId (dirty is global). */
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<'upload' | 'save' | 'render' | 'removebg' | null>(null);
+  /** Mirrors busy for the undo/redo callbacks invoked from the keyboard handler. */
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   /** Active tool in the left rail; selecting a canvas object follows its kind. */
   const [tool, setTool] = useState<StudioTool>('uploads');
@@ -412,6 +415,29 @@ export function EditorClient({
     }
     setAreaCounts(counts);
   }, [designedObjects]);
+
+  // ---- undo/redo (v1.9): snapshot stack over the same placements format the
+  // save path serializes, so restoring a snapshot reuses the tested reopen logic.
+  /** Stack of PREVIOUS states; top = what undo restores. Serialized placements JSON. */
+  const undoStackRef = useRef<string[]>([]);
+  const redoStackRef = useRef<string[]>([]);
+  /** The current state's serialization (the baseline the next mutation pushes). */
+  const lastSnapshotRef = useRef<string>('[]');
+  /** True while a snapshot is being applied; mutations then never record. */
+  const restoringRef = useRef(false);
+  /** Bumped on stack changes so the toolbar buttons re-render their disabled state. */
+  const [historyVersion, setHistoryVersion] = useState(0);
+  /** Late-bound: serializes the current placements; wired below collectPlacements. */
+  const serializeStateRef = useRef<() => string>(() => '[]');
+  /** Late-bound: records an undo step; wired below once collectPlacements exists. */
+  const markMutatedRef = useRef<() => void>(() => {});
+  /** Stable mutation hook for callbacks and canvas handlers: dirty + history. */
+  const markMutated = useCallback(() => markMutatedRef.current(), []);
+  /** Late-bound undo/redo for the keyboard handler registered once at init. */
+  const undoRedoRef = useRef<{ undo: () => void; redo: () => void }>({
+    undo: () => undefined,
+    redo: () => undefined,
+  });
 
   /** The print area an object belongs to; falls back to the active one. */
   const areaOf = useCallback(
@@ -565,7 +591,7 @@ export function EditorClient({
       canvas.discardActiveObject();
       canvas.requestRenderAll();
       setSelection(null);
-      setDirty(true);
+      markMutated();
       refreshAreaCounts();
     }
   }, [refreshAreaCounts]);
@@ -676,6 +702,114 @@ export function EditorClient({
     [],
   );
 
+  /**
+   * Rebuilds one stored image object on the canvas (reopen and undo/redo paths).
+   * Async (network image); checks the canvas is still current before adding.
+   */
+  const restoreImageObject = useCallback(
+    (saved: Extract<DesignObject, { type: 'image' }>, areaKey: string): Promise<void> => {
+      const canvas = canvasRef.current;
+      if (!canvas) return Promise.resolve();
+      return FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
+        .then((img) => {
+          if (canvasRef.current !== canvas) return;
+          const naturalWidth = img.width ?? saved.width;
+          const naturalHeight = img.height ?? saved.height;
+          const mine = areaKey === activeAreaKeyRef.current;
+          img.set({
+            originX: 'center',
+            originY: 'center',
+            left: saved.x,
+            top: saved.y,
+            scaleX: saved.width / naturalWidth,
+            scaleY: saved.height / naturalHeight,
+            angle: saved.rotation,
+            visible: mine,
+            evented: mine,
+            selectable: mine,
+          });
+          applySelectionStyle(img);
+          const designed = img as DesignedObject;
+          designed.kind = 'image';
+          designed.assetId = saved.assetId;
+          designed.printAreaKey = areaKey;
+          canvas.add(img);
+          canvas.requestRenderAll();
+          refreshAreaCounts();
+        })
+        .catch(() => {
+          setStatus({
+            tone: 'error',
+            message: 'Some saved artwork could not be loaded; it may have been removed.',
+          });
+        });
+    },
+    [refreshAreaCounts],
+  );
+
+  /**
+   * Rebuilds one stored text object on the canvas (reopen and undo/redo paths).
+   * Waits for the fonts: measuring with a fallback would distort the
+   * scale-to-stored-box math.
+   */
+  const restoreTextObject = useCallback(
+    (saved: Extract<DesignObject, { type: 'text' }>, areaKey: string): Promise<void> => {
+      const canvas = canvasRef.current;
+      if (!canvas) return Promise.resolve();
+      return ensureEditorFonts()
+        .catch(() => undefined) // degraded measurement beats losing the object
+        .then(() => {
+          if (canvasRef.current !== canvas) return;
+          const isBox = saved.wrapMode === 'box';
+          const itext = makeDesignedText(saved.text, areaKey, {
+            fontKey: saved.fontFamily,
+            fontSize: saved.fontSize,
+            color: saved.color,
+            align: saved.align,
+            direction: saved.direction ?? 'auto',
+            wrap: isBox,
+            // The stored width IS the wrap box width; the Textbox re-wraps live
+            // with its own engine and regenerates wrappedLines on the next save.
+            width: isBox ? saved.width : undefined,
+            outline: saved.outline,
+            shadow: saved.shadow,
+            letterSpacing: saved.letterSpacing,
+          });
+          const mine = areaKey === activeAreaKeyRef.current;
+          itext.set({
+            left: saved.x,
+            top: saved.y,
+            angle: saved.rotation,
+            visible: mine,
+            evented: mine,
+            selectable: mine,
+          });
+          // Faithful geometry for plain text: scale the measured natural box to the
+          // stored box, so validation sees exactly the saved rectangle even if
+          // metrics drifted. A Textbox already has the exact stored width and a
+          // self-consistent re-wrapped height; scaling it would change the wrap.
+          // Stroke-inclusive dims (getScaled* at scale 1), NOT width/height: the
+          // saved box includes the v1.8 outline stroke, the raw props do not;
+          // dividing mismatched boxes inflated outlined text ~11% per reopen.
+          if (!isBox) {
+            const naturalWidth = itext.getScaledWidth();
+            const naturalHeight = itext.getScaledHeight();
+            if (naturalWidth && naturalHeight) {
+              itext.set({
+                scaleX: saved.width / naturalWidth,
+                scaleY: saved.height / naturalHeight,
+              });
+            }
+          }
+          itext.setCoords();
+          canvas.add(itext);
+          canvas.requestRenderAll();
+          refreshAreaCounts();
+        });
+    },
+    [makeDesignedText, refreshAreaCounts],
+  );
+
   /** Loads a view image (base or overlay) into the per-area cache. */
   const loadViewImage = useCallback(
     async (cache: Map<string, FabricImage>, cacheKey: string, url: string): Promise<FabricImage> => {
@@ -733,106 +867,29 @@ export function EditorClient({
     // A failure here is surfaced when text is actually used, not on every page view.
     void ensureEditorFonts().catch(() => undefined);
 
+    // History starts fresh per canvas; the baseline lands after the restores settle.
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    lastSnapshotRef.current = '[]';
+    setHistoryVersion((v) => v + 1);
+
     // Re-open mode: place every saved object of every placement back exactly as persisted.
     if (initialDesign) {
-      const restoreImage = (saved: Extract<DesignObject, { type: 'image' }>, areaKey: string) =>
-        FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
-          .then((img) => {
-            if (disposed) return;
-            const naturalWidth = img.width ?? saved.width;
-            const naturalHeight = img.height ?? saved.height;
-            const mine = areaKey === activeAreaKeyRef.current;
-            img.set({
-              originX: 'center',
-              originY: 'center',
-              left: saved.x,
-              top: saved.y,
-              scaleX: saved.width / naturalWidth,
-              scaleY: saved.height / naturalHeight,
-              angle: saved.rotation,
-              visible: mine,
-              evented: mine,
-              selectable: mine,
-            });
-            applySelectionStyle(img);
-            const designed = img as DesignedObject;
-            designed.kind = 'image';
-            designed.assetId = saved.assetId;
-            designed.printAreaKey = areaKey;
-            canvas.add(img);
-            canvas.requestRenderAll();
-            refreshAreaCounts();
-          })
-          .catch(() => {
-            setStatus({
-              tone: 'error',
-              message: 'Some saved artwork could not be loaded; it may have been removed.',
-            });
-          });
-
-      // Text restores AFTER the fonts are ready: measuring with a fallback font would
-      // distort the scale-to-stored-box math below.
-      const restoreText = (saved: Extract<DesignObject, { type: 'text' }>, areaKey: string) =>
-        ensureEditorFonts()
-          .catch(() => undefined) // degraded measurement beats losing the object
-          .then(() => {
-            if (disposed) return;
-            const isBox = saved.wrapMode === 'box';
-            const itext = makeDesignedText(saved.text, areaKey, {
-              fontKey: saved.fontFamily,
-              fontSize: saved.fontSize,
-              color: saved.color,
-              align: saved.align,
-              direction: saved.direction ?? 'auto',
-              wrap: isBox,
-              // The stored width IS the wrap box width; the Textbox re-wraps live
-              // with its own engine and regenerates wrappedLines on the next save.
-              width: isBox ? saved.width : undefined,
-              outline: saved.outline,
-              shadow: saved.shadow,
-              letterSpacing: saved.letterSpacing,
-            });
-            const mine = areaKey === activeAreaKeyRef.current;
-            itext.set({
-              left: saved.x,
-              top: saved.y,
-              angle: saved.rotation,
-              visible: mine,
-              evented: mine,
-              selectable: mine,
-            });
-            // Faithful geometry for plain text: scale the measured natural box to the
-            // stored box, so validation sees exactly the saved rectangle even if
-            // metrics drifted. A Textbox already has the exact stored width and a
-            // self-consistent re-wrapped height; scaling it would change the wrap.
-            // Stroke-inclusive dims (getScaled* at scale 1), NOT width/height: the
-            // saved box includes the v1.8 outline stroke, the raw props do not;
-            // dividing mismatched boxes inflated outlined text ~11% per reopen.
-            if (!isBox) {
-              const naturalWidth = itext.getScaledWidth();
-              const naturalHeight = itext.getScaledHeight();
-              if (naturalWidth && naturalHeight) {
-                itext.set({
-                  scaleX: saved.width / naturalWidth,
-                  scaleY: saved.height / naturalHeight,
-                });
-              }
-            }
-            itext.setCoords();
-            canvas.add(itext);
-            canvas.requestRenderAll();
-            refreshAreaCounts();
-          });
-
+      const pending: Promise<void>[] = [];
       for (const placement of initialDesign.design.placements) {
         for (const saved of placement.objects) {
-          if (saved.type === 'text') {
-            void restoreText(saved, placement.printAreaKey);
-          } else {
-            void restoreImage(saved, placement.printAreaKey);
-          }
+          pending.push(
+            saved.type === 'text'
+              ? restoreTextObject(saved, placement.printAreaKey)
+              : restoreImageObject(saved, placement.printAreaKey),
+          );
         }
       }
+      // Undo's baseline is the restored design, not the empty canvas: the first
+      // undo after a reopen must revert the first EDIT, never wipe the design.
+      void Promise.allSettled(pending).then(() => {
+        if (!disposed) lastSnapshotRef.current = serializeStateRef.current();
+      });
     }
 
     const onMoving = (e: { target?: FabricObject }) => {
@@ -845,7 +902,7 @@ export function EditorClient({
         canvas.requestRenderAll();
         readSelection(e.target);
       }
-      setDirty(true); // edits make the saved design (and its previews) stale
+      markMutated(); // edits make the saved design (and its previews) stale
     };
     const onSelection = () => {
       boundaryRef.current?.set(BOUNDARY_ACTIVE);
@@ -865,7 +922,7 @@ export function EditorClient({
         canvas.requestRenderAll();
         readSelection(e.target);
       }
-      setDirty(true);
+      markMutated();
     };
     // Live during typing: re-resolve 'auto' direction (first strong character may
     // have changed) and refresh the readout so the overflow warning tracks the
@@ -889,9 +946,24 @@ export function EditorClient({
     canvas.on('text:changed', onTextChanged);
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       const target = event.target as HTMLElement | null;
       if (target && ['INPUT', 'TEXTAREA'].includes(target.tagName)) return;
+      // Inline text editing owns the keyboard (incl. its own ctrl+z behavior).
+      if ((canvas.getActiveObject() as IText | undefined)?.isEditing) return;
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) undoRedoRef.current.redo();
+        else undoRedoRef.current.undo();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        undoRedoRef.current.redo();
+        return;
+      }
+
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       removeActiveObject();
     };
     window.addEventListener('keydown', onKeyDown);
@@ -916,10 +988,12 @@ export function EditorClient({
     clampToPrintArea,
     clampTextScale,
     fitToPrintArea,
-    makeDesignedText,
+    markMutated,
     readSelection,
     removeActiveObject,
     refreshAreaCounts,
+    restoreImageObject,
+    restoreTextObject,
   ]);
 
   // ---- view zoom: scale the viewport around the stage center ----
@@ -1041,7 +1115,7 @@ export function EditorClient({
       canvas.requestRenderAll();
       readSelection(img);
       refreshAreaCounts();
-      setDirty(true);
+      markMutated();
       setStatus({
         tone: 'success',
         message: `${asset.originalFilename} added to ${area.name}. Drag, resize, and rotate it inside the print area.`,
@@ -1093,7 +1167,7 @@ export function EditorClient({
       canvas.requestRenderAll();
       readSelection(img);
       refreshAreaCounts();
-      setDirty(true);
+      markMutated();
       setStatus({ tone: 'success', message: 'Background removed. The original upload is untouched.' });
     } catch (error) {
       setStatus({
@@ -1126,7 +1200,7 @@ export function EditorClient({
     canvas.requestRenderAll();
     readSelection(itext);
     refreshAreaCounts();
-    setDirty(true);
+    markMutated();
     setStatus({
       tone: 'success',
       message: `Text added to ${area.name}. Double-click it to edit the wording.`,
@@ -1145,9 +1219,9 @@ export function EditorClient({
       fitToPrintArea(active);
       canvas.requestRenderAll();
       readSelection(active);
-      setDirty(true);
+      markMutated();
     },
-    [clampTextScale, fitToPrintArea, readSelection],
+    [clampTextScale, fitToPrintArea, readSelection, markMutated],
   );
 
   /** The contextual tool follows the selection; no selection, no tool panel. */
@@ -1171,9 +1245,9 @@ export function EditorClient({
       fitToPrintArea(active);
       canvas.requestRenderAll();
       readSelection(active);
-      setDirty(true);
+      markMutated();
     },
-    [clampTextScale, fitToPrintArea, readSelection],
+    [clampTextScale, fitToPrintArea, readSelection, markMutated],
   );
 
   /**
@@ -1275,9 +1349,9 @@ export function EditorClient({
       canvas.requestRenderAll();
       readSelection(replacement);
       refreshAreaCounts();
-      setDirty(true);
+      markMutated();
     },
-    [makeDesignedText, fitToPrintArea, readSelection, refreshAreaCounts],
+    [makeDesignedText, fitToPrintArea, readSelection, refreshAreaCounts, markMutated],
   );
 
   /**
@@ -1375,6 +1449,79 @@ export function EditorClient({
       .filter((a) => byArea.has(a.key))
       .map((a) => ({ printAreaKey: a.key, objects: byArea.get(a.key)! }));
   }, [designedObjects, template.printAreas]);
+
+  // ---- undo/redo engine (wires the late-bound refs declared above) ----
+
+  const serializeState = useCallback(() => JSON.stringify(collectPlacements()), [collectPlacements]);
+  serializeStateRef.current = serializeState;
+
+  /** Pushes the pre-mutation state onto the undo stack; called via markMutated. */
+  const recordHistory = useCallback(() => {
+    if (restoringRef.current) return;
+    const next = serializeState();
+    if (next === lastSnapshotRef.current) return; // no geometric/content change
+    undoStackRef.current.push(lastSnapshotRef.current);
+    if (undoStackRef.current.length > 50) undoStackRef.current.shift();
+    redoStackRef.current = [];
+    lastSnapshotRef.current = next;
+    setHistoryVersion((v) => v + 1);
+  }, [serializeState]);
+  markMutatedRef.current = () => {
+    setDirty(true);
+    recordHistory();
+  };
+
+  /** Clears the design objects and rebuilds them from a placements snapshot. */
+  const applySnapshot = useCallback(
+    async (snapshot: string) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      restoringRef.current = true;
+      try {
+        const placements = JSON.parse(snapshot) as DesignPlacement[];
+        canvas.discardActiveObject();
+        for (const obj of designedObjects()) canvas.remove(obj);
+        setSelection(null);
+        const pending: Promise<void>[] = [];
+        for (const placement of placements) {
+          for (const saved of placement.objects) {
+            pending.push(
+              saved.type === 'text'
+                ? restoreTextObject(saved, placement.printAreaKey)
+                : restoreImageObject(saved, placement.printAreaKey),
+            );
+          }
+        }
+        await Promise.allSettled(pending);
+        canvas.requestRenderAll();
+        refreshAreaCounts();
+      } finally {
+        restoringRef.current = false;
+      }
+    },
+    [designedObjects, restoreImageObject, restoreTextObject, refreshAreaCounts],
+  );
+
+  const undo = useCallback(async () => {
+    if (busyRef.current || restoringRef.current || undoStackRef.current.length === 0) return;
+    const previous = undoStackRef.current.pop()!;
+    redoStackRef.current.push(lastSnapshotRef.current);
+    lastSnapshotRef.current = previous;
+    setHistoryVersion((v) => v + 1);
+    await applySnapshot(previous);
+    setDirty(true); // differs from what the server has until the next save
+  }, [applySnapshot]);
+
+  const redo = useCallback(async () => {
+    if (busyRef.current || restoringRef.current || redoStackRef.current.length === 0) return;
+    const next = redoStackRef.current.pop()!;
+    undoStackRef.current.push(lastSnapshotRef.current);
+    lastSnapshotRef.current = next;
+    setHistoryVersion((v) => v + 1);
+    await applySnapshot(next);
+    setDirty(true);
+  }, [applySnapshot]);
+  undoRedoRef.current = { undo: () => void undo(), redo: () => void redo() };
 
   const areaName = useCallback(
     (key: string) => template.printAreas.find((a) => a.key === key)?.name ?? key,
@@ -1870,14 +2017,29 @@ export function EditorClient({
           </div>
         )}
         <div className="studio__topbar-spacer" />
-        <div className="studio__history">
-          <button type="button" disabled title="Undo (coming soon)" aria-label="Undo">
+        {/* data-history-version ties the buttons' disabled state to stack changes. */}
+        <div className="studio__history" data-history-version={historyVersion}>
+          <button
+            type="button"
+            data-testid="undo-button"
+            disabled={busy !== null || undoStackRef.current.length === 0}
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo"
+            onClick={() => void undo()}
+          >
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M8 5L3 10l5 5" />
               <path d="M3 10h11a6 6 0 0 1 0 12h-3" />
             </svg>
           </button>
-          <button type="button" disabled title="Redo (coming soon)" aria-label="Redo">
+          <button
+            type="button"
+            data-testid="redo-button"
+            disabled={busy !== null || redoStackRef.current.length === 0}
+            title="Redo (Ctrl+Y)"
+            aria-label="Redo"
+            onClick={() => void redo()}
+          >
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M16 5l5 5-5 5" />
               <path d="M21 10H10a6 6 0 0 0 0 12h3" />

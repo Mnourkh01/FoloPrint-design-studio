@@ -37,8 +37,24 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
 - Server is the authority: every upload and design is re-validated server-side, per placement
   against its own print area. Client clamping is UX only.
 - API never returns filesystem paths. Files stream through `/assets/:id/file`,
-  `/templates/:slug/image|overlay`, `/templates/:slug/areas/:key/image|overlay`,
+  `/templates/:slug/image|overlay|thumb`, `/templates/:slug/areas/:key/image|overlay|thumb`,
   `/designs/:id/preview/:printAreaKey`, `/fonts/:key/file`.
+- Photo templates (v1.7B): template/area carry an optional garment `mask` (design ink is
+  clipped to its alpha at render time) and an `overlayBlend` ('over'|'multiply'|'soft-light');
+  the editor mirrors the blend with a canvas composite op so live view matches the server
+  render. Source blanks + the derivation script live in `apps/api/prisma/assets/`; the seed
+  copies them into storage.
+- Pattern tiling (v1.9): optional `pattern` ({type grid|mirror|half-drop, spacing 0..100})
+  on image objects; the object's box is the BASE TILE and the fill covers the whole print
+  area (clipped to it), phase anchored to the tile position. Patterned objects must have
+  rotation 0. Editor preview = meta-tile canvas in a Fabric Pattern fill on an area-sized
+  rect; server tiles on a margin-padded sheet (sharp rejects negative composite offsets)
+  then extracts the area rect.
+- Background removal (`POST /assets/:id/remove-background`) derives a NEW png asset by
+  border flood-fill (flat backgrounds only, renderer `removeFlatBackground`); the source
+  asset is immutable. Crop (`POST /assets/:id/crop`, body = source-space int rect) follows
+  the same derived-asset pattern; the editor's crop frame carries the image's angle so
+  rotated images crop correctly.
 - Design objects are a discriminated union on `type: "image" | "text"`; a stored object
   without `type` is a legacy image and normalizes at read time. Text fonts come from the
   shared whitelist (`packages/shared/src/fonts.ts`); binaries live in
@@ -52,6 +68,24 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   zero-width LRM/RLM marks per line, never stored; stored text rejects all bidi control
   characters. Pango flips left/right align for RTL, so the renderer swaps them to keep
   `align` visual.
+- Text effects (v1.8): optional `outline` ({color, width 1..20}) and `shadow`
+  ({color, offsetX/offsetY within +-25, never both zero}). Editor = Fabric stroke
+  (paintFirst 'stroke'; the measured box includes it) + Shadow (blur 0; never in the
+  box). Server: outline ring-composited at width/2 BEFORE the fit-to-box, shadow
+  composited AFTER the fit at exact canvas px; shadow pixels may extend past the
+  stored box (bounded by the offset clamp) while geometry validation stays on the
+  glyph box. Optional `letterSpacing` (canvas px, -20..100): Fabric em-based
+  charSpacing in the editor, Pango letter_spacing span on the server. libvips
+  parses the text param as Pango MARKUP, so the renderer markup-escapes every
+  user line (`escapePangoMarkup`); only validated numeric attribute values are
+  ever emitted as markup. Optional `arc` (sweep degrees, ±180, non-zero): single
+  LTR line only, never combined with wrap/outline/shadow (validated 3 layers).
+  Both sides run the SAME shared `layoutArcGlyphs` (per-glyph position+tangent
+  from measured advances) so they agree; editor measures with canvas measureText
+  and rasters arced text to an offscreen canvas inside a Fabric image (kind 'text',
+  `arcProps` tag, panel wording input instead of inline edit), the server rasters
+  per-glyph with Pango. Residual metric drift is absorbed by the shared
+  fit-to-stored-box step.
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

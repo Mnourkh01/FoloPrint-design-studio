@@ -117,6 +117,248 @@ describe('renderMockup', () => {
   });
 });
 
+describe('renderMockup mask and overlay blend (photo templates)', () => {
+  let maskPath: string;
+
+  beforeAll(async () => {
+    // Garment mask: opaque ONLY over the left half of the print area (x 100..200).
+    // Ink right of x=200 must vanish, as if the garment edge ran down the middle.
+    maskPath = join(dir, 'mask.png');
+    const maskRect = await sharp({
+      create: { width: 100, height: 200, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
+    })
+      .png()
+      .toBuffer();
+    await writeFile(
+      maskPath,
+      await sharp({
+        create: { width: 400, height: 400, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+      })
+        .composite([{ input: maskRect, left: 100, top: 100 }])
+        .png()
+        .toBuffer(),
+    );
+  });
+
+  it('clips design ink to the mask alpha', async () => {
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      maskImagePath: maskPath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      // Red logo spans x 150..250: half inside the mask, half outside.
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+    });
+
+    const probe = async (left: number) =>
+      (
+        await sharp(buffer)
+          .extract({ left, top: 200, width: 1, height: 1 })
+          .raw()
+          .toBuffer({ resolveWithObject: true })
+      ).data;
+
+    const inside = await probe(170); // masked-in: red ink stays
+    expect(inside[0]).toBeGreaterThan(150);
+    expect(inside[1]).toBeLessThan(120);
+
+    const outside = await probe(230); // masked-out: plain gray base shows through
+    expect(outside[0]).toBeGreaterThan(200);
+    expect(outside[1]).toBeGreaterThan(200);
+  });
+
+  it('multiply overlay darkens the base instead of pasting over it', async () => {
+    // 50% gray, fully opaque: multiply halves every channel; plain 'over' would
+    // replace the canvas with flat gray instead.
+    const grayOverlayPath = join(dir, 'gray-overlay.png');
+    await writeFile(
+      grayOverlayPath,
+      await sharp({
+        create: { width: 400, height: 400, channels: 4, background: { r: 128, g: 128, b: 128, alpha: 1 } },
+      })
+        .png()
+        .toBuffer(),
+    );
+
+    const buffer = await renderMockup({
+      baseImagePath: basePath, // gray 230
+      overlayImagePath: grayOverlayPath,
+      overlayBlend: 'multiply',
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+    });
+
+    // Outside the design: base 230 * 128/255 ~ 115.
+    const { data: corner } = await sharp(buffer)
+      .extract({ left: 10, top: 10, width: 1, height: 1 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    expect(corner[0]).toBeGreaterThan(95);
+    expect(corner[0]).toBeLessThan(135);
+
+    // The red ink darkens too (multiply re-applies shadows over the print).
+    const { data: ink } = await sharp(buffer)
+      .extract({ left: 200, top: 200, width: 1, height: 1 })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    expect(ink[0]).toBeGreaterThan(60);
+    expect(ink[0]).toBeLessThan(140); // 200 * 128/255 ~ 100
+  });
+
+  it('rejects an unknown overlay blend', async () => {
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        overlayImagePath: overlayPath,
+        overlayBlend: 'screen' as never,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [{ type: 'image' as const, imagePath: logoPath, x: 200, y: 200, width: 100, height: 100, rotation: 0 }],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+
+  it('mask and multiply overlay combine into a canvas-sized PNG', async () => {
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      overlayImagePath: overlayPath,
+      overlayBlend: 'multiply',
+      maskImagePath: maskPath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [{ type: 'image' as const, imagePath: logoPath, x: 180, y: 200, width: 60, height: 60, rotation: 15 }],
+    });
+    expect(buffer.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    const meta = await sharp(buffer).metadata();
+    expect(meta.width).toBe(400);
+    expect(meta.height).toBe(400);
+  });
+});
+
+describe('renderMockup pattern tiling (v1.9)', () => {
+  const patternObject = (pattern: { type: 'grid' | 'mirror' | 'half-drop'; spacing: number }) => ({
+    type: 'image' as const,
+    imagePath: logoPath, // 120x120 solid red source
+    x: 200,
+    y: 200,
+    width: 50,
+    height: 50,
+    rotation: 0,
+    pattern,
+  });
+
+  const render = (pattern: { type: 'grid' | 'mirror' | 'half-drop'; spacing: number }) =>
+    renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [patternObject(pattern)],
+    });
+
+  const probe = async (png: Buffer, left: number, top: number) =>
+    (
+      await sharp(png).extract({ left, top, width: 1, height: 1 }).raw().toBuffer({ resolveWithObject: true })
+    ).data;
+
+  it('fills the whole print area from a small centered tile and clips at the edges', async () => {
+    const png = await render({ type: 'grid', spacing: 0 });
+
+    // Far corners INSIDE the area (100..300 square) carry the red tile fill.
+    for (const [x, y] of [[105, 105], [295, 295], [105, 295], [295, 105]] as const) {
+      const px = await probe(png, x, y);
+      expect(px[0]).toBeGreaterThan(150);
+      expect(px[1]).toBeLessThan(120);
+    }
+
+    // Just OUTSIDE the area: plain gray base, the fill is clipped.
+    const outside = await probe(png, 95, 200);
+    expect(outside[0]).toBeGreaterThan(200);
+    expect(outside[1]).toBeGreaterThan(200);
+  });
+
+  it('spacing leaves base-colored gaps between tiles', async () => {
+    const png = await render({ type: 'grid', spacing: 30 });
+    // The base tile spans 175..225; the gap band right of it (225..255) shows the base.
+    const gap = await probe(png, 240, 200);
+    expect(gap[0]).toBeGreaterThan(200);
+    expect(gap[1]).toBeGreaterThan(200);
+  });
+
+  it('mirror and half-drop lay out differently from grid', async () => {
+    // The solid-color source tiles identically under every type, so give the type
+    // comparison an asymmetric two-band tile instead.
+    const bandPath = join(dir, 'band.png');
+    await writeFile(
+      bandPath,
+      await sharp({
+        create: { width: 60, height: 60, channels: 4, background: { r: 200, g: 30, b: 30, alpha: 1 } },
+      })
+        .composite([
+          {
+            input: { create: { width: 30, height: 60, channels: 4, background: { r: 30, g: 30, b: 200, alpha: 1 } } },
+            left: 0,
+            top: 0,
+          },
+        ])
+        .png()
+        .toBuffer(),
+    );
+    const renderBand = (type: 'grid' | 'mirror' | 'half-drop') =>
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [{ ...patternObject({ type, spacing: 10 }), imagePath: bandPath }],
+      });
+
+    const [grid, mirror, halfDrop] = await Promise.all([
+      renderBand('grid'),
+      renderBand('mirror'),
+      renderBand('half-drop'),
+    ]);
+    expect(grid.equals(mirror)).toBe(false);
+    expect(grid.equals(halfDrop)).toBe(false);
+    expect(mirror.equals(halfDrop)).toBe(false);
+  });
+
+  it('rejects rotated patterns and invalid pattern values', async () => {
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [{ ...patternObject({ type: 'grid', spacing: 0 }), rotation: 20 }],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [patternObject({ type: 'swirl' as never, spacing: 0 })],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [patternObject({ type: 'grid', spacing: 999 })],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});
+
 describe('renderMockup per print area (multi-area designs)', () => {
   // The API renders one mockup per placement: each call gets that area's own base
   // (front photo vs back photo) and that area's rect. These tests prove the renderer

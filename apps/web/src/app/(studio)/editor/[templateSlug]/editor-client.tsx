@@ -3,31 +3,49 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Rect, Textbox, type FabricObject } from 'fabric';
+import { Canvas, FabricImage, IText, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
+  ARC_GLYPH_HEIGHT_FACTOR,
+  ARC_SWEEP_MAX,
+  ARC_SWEEP_MIN,
   evaluateObjectQuality,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   FONT_WHITELIST,
   fontDefinitionOf,
+  layoutArcGlyphs,
+  LETTER_SPACING_MAX,
+  LETTER_SPACING_MIN,
+  OUTLINE_WIDTH_MAX,
+  OUTLINE_WIDTH_MIN,
+  PATTERN_SPACING_MAX,
+  PATTERN_SPACING_MIN,
   printAreaPpi,
   resolveTextDirection,
+  SHADOW_OFFSET_MAX,
   TEXT_MAX_LINES,
   validateDesignPlacements,
   type DesignObject,
   type DesignPlacement,
   type DesignProjectDto,
+  type ImagePattern,
+  type OverlayBlend,
+  type PatternType,
   type PrintAreaDto,
   type PrintQualityLevel,
   type ProductTemplateDto,
   type TextAlign,
   type TextDirection,
+  type TextOutline,
+  type TextShadow,
 } from '@foloprint/shared';
 import {
   ApiError,
   apiUrl,
   assetFileUrl,
+  cropAsset,
   fontFileUrl,
+  removeAssetBackground,
   renderDesign,
   saveDesign,
   updateDesign,
@@ -35,6 +53,17 @@ import {
 } from '@/lib/api';
 
 const STAGE_WIDTH = 680;
+
+/**
+ * Canvas2D composite operation per contract overlay blend, so the live editor
+ * shades the artwork exactly like the server render (sharp uses the same Porter-
+ * Duff/PDF operators under these names).
+ */
+const FABRIC_OVERLAY_BLEND: Record<OverlayBlend, GlobalCompositeOperation> = {
+  over: 'source-over',
+  multiply: 'multiply',
+  'soft-light': 'soft-light',
+};
 
 /**
  * Print-area boundary styling: quiet at rest so the garment mockup carries the view,
@@ -182,7 +211,36 @@ const CONTEXT_TOOL_ICONS = {
       <path d="M12 8v8M8 12h8" />
     </svg>
   ),
+  'remove-bg': (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M7 20h12" />
+      <path d="M5.5 13.5l8-8a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8l-8 8H7.7a2 2 0 0 1-1.4-.6l-.8-.8a2 2 0 0 1 0-2.8z" />
+      <path d="M10 9l5 5" />
+    </svg>
+  ),
+  crop: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+      <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+    </svg>
+  ),
+  pattern: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  ),
 };
+
+/** Pattern panel choices; null = single image. */
+const PATTERN_CHOICES: { key: PatternType | null; label: string }[] = [
+  { key: null, label: 'None' },
+  { key: 'grid', label: 'Grid' },
+  { key: 'mirror', label: 'Mirror' },
+  { key: 'half-drop', label: 'Half-drop' },
+];
 
 /**
  * Polished selection chrome shared by every design object: branded border,
@@ -247,10 +305,39 @@ type DesignedObject = FabricObject & {
   fontKey?: string;
   /** Contract direction value ('auto' | 'ltr' | 'rtl'); Fabric's own `direction` holds the resolved one. */
   textDirection?: TextDirection;
+  /** v1.9 tiling fill (image objects); the preview rect is rebuilt from this. */
+  pattern?: ImagePattern;
+};
+
+/** Non-interactive area-sized rect carrying the live pattern preview for one image. */
+type PatternPreviewRect = Rect & {
+  patternPreview?: true;
+  patternFor?: DesignedObject;
+  printAreaKey?: string;
 };
 
 /** IText for plain text, Textbox when wrap-in-box is on (same prop surface). */
 type DesignedText = (IText | Textbox) & DesignedObject;
+
+/**
+ * Arced text (v1.8) is a FabricImage carrying its text metadata, because per-glyph
+ * curved layout can't live in an IText. It is still `kind: 'text'` and serializes
+ * as a text object with `arc`; both the editor raster and the server render use the
+ * shared layoutArcGlyphs, so they agree. Inline editing is replaced by a panel
+ * wording input. `arcProps` present is the discriminator.
+ */
+interface ArcTextProps {
+  text: string;
+  fontKey: string;
+  fontSize: number;
+  color: string;
+  align: TextAlign;
+  letterSpacing: number;
+  arc: number;
+}
+type DesignedArcText = FabricImage & DesignedObject & { arcProps: ArcTextProps };
+const isArcText = (obj: DesignedObject | undefined | null): obj is DesignedArcText =>
+  Boolean(obj && (obj as DesignedArcText).arcProps);
 
 /** Visual line count: Fabric's textLines includes soft wraps for Textbox. */
 const visualLineCountOf = (t: DesignedText): number =>
@@ -273,6 +360,8 @@ interface SelectionReadout {
   quality: { effectiveDpi: number; level: PrintQualityLevel } | null;
   /** Physical print size in inches (image only); null when the area has no usable ppi. */
   physical: { widthIn: number; heightIn: number } | null;
+  /** v1.9 tiling fill (image only); null = single image. */
+  pattern: ImagePattern | null;
   /** Text styling, present when kind === 'text'. */
   text: {
     fontKey: string;
@@ -287,6 +376,14 @@ interface SelectionReadout {
     wrap: boolean;
     /** Current visual line count (soft wraps included for Textbox). */
     lineCount: number;
+    /** v1.8 glyph outline; null = off. */
+    outline: TextOutline | null;
+    /** v1.8 hard drop shadow; null = off. */
+    shadow: TextShadow | null;
+    /** v1.8 letter spacing in canvas px at the current effective size; 0 = default. */
+    letterSpacing: number;
+    /** v1.8 arc sweep in degrees; null = straight. */
+    arc: number | null;
   } | null;
 }
 
@@ -341,7 +438,10 @@ export function EditorClient({
   const [designId, setDesignId] = useState<string | null>(initialDesign?.id ?? null);
   /** True when ANY area differs from what the server has for designId (dirty is global). */
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<'upload' | 'save' | 'render' | null>(null);
+  const [busy, setBusy] = useState<'upload' | 'save' | 'render' | 'removebg' | 'crop' | null>(null);
+  /** Mirrors busy for the undo/redo callbacks invoked from the keyboard handler. */
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   /** Active tool in the left rail; selecting a canvas object follows its kind. */
   const [tool, setTool] = useState<StudioTool>('uploads');
@@ -353,7 +453,10 @@ export function EditorClient({
   const [viewZoom, setViewZoom] = useState(1);
 
   /** Open contextual object tool (toolbar above the stage); null = toolbar only. */
-  const [objectTool, setObjectTool] = useState<'transform' | 'position' | null>(null);
+  const [objectTool, setObjectTool] = useState<'transform' | 'position' | 'pattern' | null>(null);
+
+  /** Local mirror of the selected arc text's wording, for the panel input. */
+  const [arcWording, setArcWording] = useState('');
 
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
@@ -380,12 +483,168 @@ export function EditorClient({
     setAreaCounts(counts);
   }, [designedObjects]);
 
+  // ---- undo/redo (v1.9): snapshot stack over the same placements format the
+  // save path serializes, so restoring a snapshot reuses the tested reopen logic.
+  /** Stack of PREVIOUS states; top = what undo restores. Serialized placements JSON. */
+  const undoStackRef = useRef<string[]>([]);
+  const redoStackRef = useRef<string[]>([]);
+  /** The current state's serialization (the baseline the next mutation pushes). */
+  const lastSnapshotRef = useRef<string>('[]');
+  /** True while a snapshot is being applied; mutations then never record. */
+  const restoringRef = useRef(false);
+  /** Bumped on stack changes so the toolbar buttons re-render their disabled state. */
+  const [historyVersion, setHistoryVersion] = useState(0);
+  /** Late-bound: serializes the current placements; wired below collectPlacements. */
+  const serializeStateRef = useRef<() => string>(() => '[]');
+  /** Late-bound: records an undo step; wired below once collectPlacements exists. */
+  const markMutatedRef = useRef<() => void>(() => {});
+  /** Stable mutation hook for callbacks and canvas handlers: dirty + history. */
+  const markMutated = useCallback(() => markMutatedRef.current(), []);
+  /** Late-bound undo/redo for the keyboard handler registered once at init. */
+  const undoRedoRef = useRef<{ undo: () => void; redo: () => void }>({
+    undo: () => undefined,
+    redo: () => undefined,
+  });
+
+  // ---- crop mode (v1.9): an interactive rect over the selected image; Apply
+  // derives a cropped asset server-side and swaps the object in place.
+  const cropRectRef = useRef<(Rect & { cropTag?: boolean }) | null>(null);
+  const cropImageRef = useRef<(DesignedObject & FabricImage) | null>(null);
+  const [cropping, setCropping] = useState(false);
+  const croppingRef = useRef(cropping);
+  croppingRef.current = cropping;
+  /** Late-bound clamp for the canvas handlers registered once at init. */
+  const clampCropRectRef = useRef<() => void>(() => {});
+  /** Late-bound cancel for the area-switch effect (defined above the callback). */
+  const cancelCropRef = useRef<() => void>(() => {});
+
   /** The print area an object belongs to; falls back to the active one. */
   const areaOf = useCallback(
     (obj: DesignedObject): PrintAreaDto | undefined =>
       template.printAreas.find((a) => a.key === (obj.printAreaKey ?? activeAreaKeyRef.current)),
     [template.printAreas],
   );
+
+  // ---- pattern preview (v1.9): a non-interactive area-sized rect under the tile,
+  // filled with a meta-tile canvas Pattern so the repeat is visible live.
+
+  /** Draws the meta-tile (1x1 grid, 2x2 mirror, 2-col half-drop) for a patterned image. */
+  const buildMetaTile = useCallback((obj: DesignedObject & FabricImage): HTMLCanvasElement | null => {
+    const el = obj.getElement() as HTMLImageElement | HTMLCanvasElement | undefined;
+    const pattern = obj.pattern;
+    if (!el || !pattern) return null;
+    const tileW = Math.max(1, Math.round(obj.getScaledWidth()));
+    const tileH = Math.max(1, Math.round(obj.getScaledHeight()));
+    const spacing = Math.round(pattern.spacing);
+    const stepX = tileW + spacing;
+    const stepY = tileH + spacing;
+
+    const meta = document.createElement('canvas');
+    meta.width = pattern.type === 'grid' ? stepX : 2 * stepX;
+    meta.height = pattern.type === 'mirror' ? 2 * stepY : stepY;
+    const ctx = meta.getContext('2d');
+    if (!ctx) return null;
+
+    const draw = (x: number, y: number, flipX: boolean, flipY: boolean) => {
+      ctx.save();
+      ctx.translate(x + (flipX ? tileW : 0), y + (flipY ? tileH : 0));
+      ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      ctx.drawImage(el, 0, 0, tileW, tileH);
+      ctx.restore();
+    };
+    if (pattern.type === 'grid') {
+      draw(0, 0, false, false);
+    } else if (pattern.type === 'mirror') {
+      draw(0, 0, false, false);
+      draw(stepX, 0, true, false);
+      draw(0, stepY, false, true);
+      draw(stepX, stepY, true, true);
+    } else {
+      // half-drop: second column shifted half a step, drawn twice so it wraps.
+      draw(0, 0, false, false);
+      draw(stepX, Math.round(stepY / 2), false, false);
+      draw(stepX, Math.round(stepY / 2) - stepY, false, false);
+    }
+    return meta;
+  }, []);
+
+  /** Cheap per-drag update: re-phases the existing preview fill to the tile position. */
+  const updatePatternOffset = useCallback(
+    (obj: DesignedObject) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const preview = canvas
+        .getObjects()
+        .find((o) => (o as PatternPreviewRect).patternFor === obj) as PatternPreviewRect | undefined;
+      const area = areaOf(obj);
+      const fill = preview?.fill;
+      if (!preview || !area || !(fill instanceof Pattern)) return;
+      const source = fill.source as HTMLCanvasElement;
+      const mod = (a: number, n: number) => ((a % n) + n) % n;
+      fill.offsetX = mod((obj.left ?? 0) - obj.getScaledWidth() / 2 - area.x, source.width);
+      fill.offsetY = mod((obj.top ?? 0) - obj.getScaledHeight() / 2 - area.y, source.height);
+      preview.dirty = true;
+      canvas.requestRenderAll();
+    },
+    [areaOf],
+  );
+
+  /** Removes the preview rect belonging to the given image, if any. */
+  const removePatternPreviewFor = useCallback((obj: DesignedObject) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    for (const o of [...canvas.getObjects()]) {
+      if ((o as PatternPreviewRect).patternFor === obj) canvas.remove(o);
+    }
+  }, []);
+
+  /** Full rebuild: new meta-tile (size/spacing/type changes) + fresh preview rect. */
+  const refreshPatternPreview = useCallback(
+    (obj: DesignedObject) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      removePatternPreviewFor(obj);
+      if (obj.kind !== 'image' || !obj.pattern) {
+        canvas.requestRenderAll();
+        return;
+      }
+      const area = areaOf(obj);
+      const meta = buildMetaTile(obj as DesignedObject & FabricImage);
+      if (!area || !meta) return;
+      const rect = new Rect({
+        left: area.x,
+        top: area.y,
+        originX: 'left',
+        originY: 'top',
+        width: area.width,
+        height: area.height,
+        fill: new Pattern({ source: meta, repeat: 'repeat' }),
+        selectable: false,
+        evented: false,
+        visible: obj.visible,
+      }) as PatternPreviewRect;
+      rect.patternPreview = true;
+      rect.patternFor = obj;
+      rect.printAreaKey = obj.printAreaKey;
+      canvas.add(rect);
+      canvas.sendObjectToBack(rect);
+      updatePatternOffset(obj);
+      canvas.requestRenderAll();
+    },
+    [areaOf, buildMetaTile, removePatternPreviewFor, updatePatternOffset],
+  );
+
+  /** Late-bound mirrors for the canvas handlers registered once at init. */
+  const patternHooksRef = useRef({
+    refresh: (_obj: DesignedObject) => {},
+    offset: (_obj: DesignedObject) => {},
+    remove: (_obj: DesignedObject) => {},
+  });
+  patternHooksRef.current = {
+    refresh: refreshPatternPreview,
+    offset: updatePatternOffset,
+    remove: removePatternPreviewFor,
+  };
 
   /** Keep the object's bounding box inside ITS OWN print area by translating it. */
   const clampToPrintArea = useCallback(
@@ -473,8 +732,24 @@ export function EditorClient({
             }
           : null;
       const t = designed as DesignedText;
-      const text =
-        designed.kind === 'text'
+      // Arced text is a tagged image; its panel state comes from arcProps, scaled
+      // size and effects (none allowed) excluded.
+      const text = isArcText(designed)
+        ? {
+            fontKey: designed.arcProps.fontKey,
+            color: designed.arcProps.color,
+            fontSize: Math.round(designed.arcProps.fontSize * (designed.scaleY ?? 1)),
+            align: designed.arcProps.align,
+            direction: 'ltr' as TextDirection,
+            resolvedDirection: 'ltr' as const,
+            wrap: false,
+            lineCount: 1,
+            outline: null,
+            shadow: null,
+            letterSpacing: designed.arcProps.letterSpacing * (designed.scaleY ?? 1),
+            arc: designed.arcProps.arc,
+          }
+        : designed.kind === 'text'
           ? {
               fontKey: designed.fontKey ?? TEXT_DEFAULTS.fontKey,
               color: typeof t.fill === 'string' ? (t.fill as string) : TEXT_DEFAULTS.color,
@@ -486,6 +761,26 @@ export function EditorClient({
               resolvedDirection: resolveTextDirection(t.text ?? '', designed.textDirection ?? 'auto'),
               wrap: t instanceof Textbox,
               lineCount: visualLineCountOf(t),
+              // Effects live in Fabric's own props: stroke pair for the outline,
+              // the Shadow object for the shadow. No extra tags to drift.
+              outline:
+                typeof t.stroke === 'string' && (t.strokeWidth ?? 0) > 0
+                  ? { color: t.stroke, width: t.strokeWidth ?? 0 }
+                  : null,
+              shadow:
+                t.shadow && typeof t.shadow === 'object'
+                  ? {
+                      color: typeof t.shadow.color === 'string' ? t.shadow.color : '#000000',
+                      offsetX: t.shadow.offsetX ?? 0,
+                      offsetY: t.shadow.offsetY ?? 0,
+                    }
+                  : null,
+              // Fabric charSpacing is em/1000; px at the effective (scaled) size.
+              letterSpacing:
+                ((t.charSpacing ?? 0) / 1000) *
+                (t.fontSize ?? TEXT_DEFAULTS.fontSize) *
+                (designed.scaleY ?? 1),
+              arc: null,
             }
           : null;
       setSelection({
@@ -499,6 +794,7 @@ export function EditorClient({
           ? { effectiveDpi: Math.round(quality.effectiveDpi), level: quality.level }
           : null,
         physical,
+        pattern: designed.kind === 'image' ? (designed.pattern ?? null) : null,
         text,
       });
     },
@@ -509,11 +805,12 @@ export function EditorClient({
     const canvas = canvasRef.current;
     const active = canvas?.getActiveObject() as DesignedObject | undefined;
     if (canvas && active?.kind) {
+      patternHooksRef.current.remove(active);
       canvas.remove(active);
       canvas.discardActiveObject();
       canvas.requestRenderAll();
       setSelection(null);
-      setDirty(true);
+      markMutated();
       refreshAreaCounts();
     }
   }, [refreshAreaCounts]);
@@ -553,6 +850,12 @@ export function EditorClient({
         wrap?: boolean;
         /** Wrap box width; Textbox only. */
         width?: number;
+        /** v1.8 glyph outline; the stroke joins the measured box on purpose. */
+        outline?: TextOutline;
+        /** v1.8 hard drop shadow; never part of the measured box. */
+        shadow?: TextShadow;
+        /** v1.8 letter spacing in canvas px (mapped to em-based charSpacing). */
+        letterSpacing?: number;
       },
     ): DesignedText => {
       const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
@@ -565,11 +868,33 @@ export function EditorClient({
         originX: 'center' as const,
         originY: 'center' as const,
         direction: resolveTextDirection(content, direction),
-        // Fabric's default strokeWidth (1) inflates getScaledWidth() by 1px even with
-        // no stroke. For a Textbox that 1px becomes a wider wrap box on every
-        // save/reopen cycle and can flip a boundary-tight line break. Text never
-        // strokes here, so measure exactly.
-        strokeWidth: 0,
+        // px -> Fabric's em-based charSpacing (relative to the unscaled fontSize).
+        ...(props.letterSpacing
+          ? { charSpacing: (props.letterSpacing * 1000) / props.fontSize }
+          : {}),
+        // Without an outline, strokeWidth is 0: Fabric's default (1) inflates
+        // getScaledWidth() by 1px even with no stroke, which can flip a
+        // boundary-tight Textbox line break across save/reopen cycles. With an
+        // outline the stroke joins the measurement on purpose (the server fits
+        // the ring-composited raster to the same stroke-inclusive box).
+        ...(props.outline
+          ? {
+              stroke: props.outline.color,
+              strokeWidth: props.outline.width,
+              paintFirst: 'stroke' as const,
+              strokeLineJoin: 'round' as const,
+            }
+          : { strokeWidth: 0 }),
+        ...(props.shadow
+          ? {
+              shadow: new Shadow({
+                color: props.shadow.color,
+                offsetX: props.shadow.offsetX,
+                offsetY: props.shadow.offsetY,
+                blur: 0,
+              }),
+            }
+          : {}),
       };
       const itext = (
         props.wrap
@@ -595,6 +920,218 @@ export function EditorClient({
     },
     [],
   );
+
+  /**
+   * Rebuilds one stored image object on the canvas (reopen and undo/redo paths).
+   * Async (network image); checks the canvas is still current before adding.
+   */
+  const restoreImageObject = useCallback(
+    (saved: Extract<DesignObject, { type: 'image' }>, areaKey: string): Promise<void> => {
+      const canvas = canvasRef.current;
+      if (!canvas) return Promise.resolve();
+      return FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
+        .then((img) => {
+          if (canvasRef.current !== canvas) return;
+          const naturalWidth = img.width ?? saved.width;
+          const naturalHeight = img.height ?? saved.height;
+          const mine = areaKey === activeAreaKeyRef.current;
+          img.set({
+            originX: 'center',
+            originY: 'center',
+            left: saved.x,
+            top: saved.y,
+            scaleX: saved.width / naturalWidth,
+            scaleY: saved.height / naturalHeight,
+            angle: saved.rotation,
+            visible: mine,
+            evented: mine,
+            selectable: mine,
+          });
+          applySelectionStyle(img);
+          const designed = img as DesignedObject;
+          designed.kind = 'image';
+          designed.assetId = saved.assetId;
+          designed.printAreaKey = areaKey;
+          if (saved.pattern) {
+            designed.pattern = saved.pattern;
+            designed.set({ lockRotation: true });
+            designed.setControlsVisibility({ mtr: false });
+          }
+          canvas.add(img);
+          if (saved.pattern) patternHooksRef.current.refresh(designed);
+          canvas.requestRenderAll();
+          refreshAreaCounts();
+        })
+        .catch(() => {
+          setStatus({
+            tone: 'error',
+            message: 'Some saved artwork could not be loaded; it may have been removed.',
+          });
+        });
+    },
+    [refreshAreaCounts],
+  );
+
+  /**
+   * Rebuilds one stored text object on the canvas (reopen and undo/redo paths).
+   * Waits for the fonts: measuring with a fallback would distort the
+   * scale-to-stored-box math.
+   */
+  /** Late-bound makeArcText (defined below) so restore can build arc text too. */
+  const makeArcTextRef = useRef<(props: ArcTextProps, areaKey: string) => DesignedArcText | null>(
+    () => null,
+  );
+
+  const restoreTextObject = useCallback(
+    (saved: Extract<DesignObject, { type: 'text' }>, areaKey: string): Promise<void> => {
+      const canvas = canvasRef.current;
+      if (!canvas) return Promise.resolve();
+      return ensureEditorFonts()
+        .catch(() => undefined) // degraded measurement beats losing the object
+        .then(() => {
+          if (canvasRef.current !== canvas) return;
+          const mine = areaKey === activeAreaKeyRef.current;
+          // Arced text restores as a re-rastered image (same layoutArcGlyphs).
+          if (saved.arc) {
+            const arc = makeArcTextRef.current(
+              {
+                text: saved.text,
+                fontKey: saved.fontFamily,
+                fontSize: saved.fontSize,
+                color: saved.color,
+                align: saved.align,
+                letterSpacing: saved.letterSpacing ?? 0,
+                arc: saved.arc,
+              },
+              areaKey,
+            );
+            if (!arc) return;
+            arc.set({ left: saved.x, top: saved.y, angle: saved.rotation, visible: mine, evented: mine, selectable: mine });
+            const naturalWidth = arc.getScaledWidth();
+            const naturalHeight = arc.getScaledHeight();
+            if (naturalWidth && naturalHeight) {
+              arc.set({ scaleX: saved.width / naturalWidth, scaleY: saved.height / naturalHeight });
+            }
+            arc.setCoords();
+            canvas.add(arc);
+            canvas.requestRenderAll();
+            refreshAreaCounts();
+            return;
+          }
+          const isBox = saved.wrapMode === 'box';
+          const itext = makeDesignedText(saved.text, areaKey, {
+            fontKey: saved.fontFamily,
+            fontSize: saved.fontSize,
+            color: saved.color,
+            align: saved.align,
+            direction: saved.direction ?? 'auto',
+            wrap: isBox,
+            // The stored width IS the wrap box width; the Textbox re-wraps live
+            // with its own engine and regenerates wrappedLines on the next save.
+            width: isBox ? saved.width : undefined,
+            outline: saved.outline,
+            shadow: saved.shadow,
+            letterSpacing: saved.letterSpacing,
+          });
+          itext.set({
+            left: saved.x,
+            top: saved.y,
+            angle: saved.rotation,
+            visible: mine,
+            evented: mine,
+            selectable: mine,
+          });
+          // Faithful geometry for plain text: scale the measured natural box to the
+          // stored box, so validation sees exactly the saved rectangle even if
+          // metrics drifted. A Textbox already has the exact stored width and a
+          // self-consistent re-wrapped height; scaling it would change the wrap.
+          // Stroke-inclusive dims (getScaled* at scale 1), NOT width/height: the
+          // saved box includes the v1.8 outline stroke, the raw props do not;
+          // dividing mismatched boxes inflated outlined text ~11% per reopen.
+          if (!isBox) {
+            const naturalWidth = itext.getScaledWidth();
+            const naturalHeight = itext.getScaledHeight();
+            if (naturalWidth && naturalHeight) {
+              itext.set({
+                scaleX: saved.width / naturalWidth,
+                scaleY: saved.height / naturalHeight,
+              });
+            }
+          }
+          itext.setCoords();
+          canvas.add(itext);
+          canvas.requestRenderAll();
+          refreshAreaCounts();
+        });
+    },
+    [makeDesignedText, refreshAreaCounts],
+  );
+
+  /**
+   * Rasters arced text to an offscreen canvas using the shared layoutArcGlyphs
+   * (canvas measureText advances), at 2x for crispness. The canvas is exactly the
+   * layout bounds, so rotated glyphs clip identically to the server. Fonts must be
+   * loaded first (the caller awaits ensureEditorFonts).
+   */
+  const rasterizeArcText = useCallback((props: ArcTextProps): HTMLCanvasElement | null => {
+    const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
+    const SS = 2; // supersample
+    const measure = document.createElement('canvas').getContext('2d');
+    if (!measure) return null;
+    measure.font = `${props.fontSize}px "${definition.family}"`;
+    const chars = [...props.text];
+    const advances = chars.map((c) => Math.max(1, measure.measureText(c).width));
+    const layout = layoutArcGlyphs(advances, props.fontSize, props.arc, props.letterSpacing);
+    if (layout.positions.length === 0 || layout.width <= 0 || layout.height <= 0) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(layout.width) * SS;
+    canvas.height = Math.ceil(layout.height) * SS;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.scale(SS, SS);
+    ctx.font = `${props.fontSize}px "${definition.family}"`;
+    ctx.fillStyle = props.color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    chars.forEach((char, i) => {
+      const p = layout.positions[i]!;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate((p.rotationDeg * Math.PI) / 180);
+      ctx.fillText(char, 0, 0);
+      ctx.restore();
+    });
+    return canvas;
+  }, []);
+
+  /**
+   * Builds (or rebuilds) an arced-text FabricImage from props. Display size = the
+   * raster's layout px at scale 1, so getScaledWidth/Height serialize the box the
+   * server fits its own arc raster into. Center/area/angle are set by the caller.
+   */
+  const makeArcText = useCallback(
+    (props: ArcTextProps, areaKey: string): DesignedArcText | null => {
+      const raster = rasterizeArcText(props);
+      if (!raster) return null;
+      const SS = 2;
+      const img = new FabricImage(raster, {
+        originX: 'center',
+        originY: 'center',
+        scaleX: 1 / SS,
+        scaleY: 1 / SS,
+      }) as DesignedArcText;
+      applySelectionStyle(img);
+      img.kind = 'text';
+      img.printAreaKey = areaKey;
+      img.arcProps = props;
+      // Uniform corner scaling only; the raster is a baked unit.
+      img.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
+      return img;
+    },
+    [rasterizeArcText],
+  );
+  makeArcTextRef.current = makeArcText;
 
   /** Loads a view image (base or overlay) into the per-area cache. */
   const loadViewImage = useCallback(
@@ -653,106 +1190,61 @@ export function EditorClient({
     // A failure here is surfaced when text is actually used, not on every page view.
     void ensureEditorFonts().catch(() => undefined);
 
+    // History starts fresh per canvas; the baseline lands after the restores settle.
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    lastSnapshotRef.current = '[]';
+    setHistoryVersion((v) => v + 1);
+
     // Re-open mode: place every saved object of every placement back exactly as persisted.
     if (initialDesign) {
-      const restoreImage = (saved: Extract<DesignObject, { type: 'image' }>, areaKey: string) =>
-        FabricImage.fromURL(apiUrl(assetFileUrl(saved.assetId)), { crossOrigin: 'anonymous' })
-          .then((img) => {
-            if (disposed) return;
-            const naturalWidth = img.width ?? saved.width;
-            const naturalHeight = img.height ?? saved.height;
-            const mine = areaKey === activeAreaKeyRef.current;
-            img.set({
-              originX: 'center',
-              originY: 'center',
-              left: saved.x,
-              top: saved.y,
-              scaleX: saved.width / naturalWidth,
-              scaleY: saved.height / naturalHeight,
-              angle: saved.rotation,
-              visible: mine,
-              evented: mine,
-              selectable: mine,
-            });
-            applySelectionStyle(img);
-            const designed = img as DesignedObject;
-            designed.kind = 'image';
-            designed.assetId = saved.assetId;
-            designed.printAreaKey = areaKey;
-            canvas.add(img);
-            canvas.requestRenderAll();
-            refreshAreaCounts();
-          })
-          .catch(() => {
-            setStatus({
-              tone: 'error',
-              message: 'Some saved artwork could not be loaded; it may have been removed.',
-            });
-          });
-
-      // Text restores AFTER the fonts are ready: measuring with a fallback font would
-      // distort the scale-to-stored-box math below.
-      const restoreText = (saved: Extract<DesignObject, { type: 'text' }>, areaKey: string) =>
-        ensureEditorFonts()
-          .catch(() => undefined) // degraded measurement beats losing the object
-          .then(() => {
-            if (disposed) return;
-            const isBox = saved.wrapMode === 'box';
-            const itext = makeDesignedText(saved.text, areaKey, {
-              fontKey: saved.fontFamily,
-              fontSize: saved.fontSize,
-              color: saved.color,
-              align: saved.align,
-              direction: saved.direction ?? 'auto',
-              wrap: isBox,
-              // The stored width IS the wrap box width; the Textbox re-wraps live
-              // with its own engine and regenerates wrappedLines on the next save.
-              width: isBox ? saved.width : undefined,
-            });
-            const mine = areaKey === activeAreaKeyRef.current;
-            itext.set({
-              left: saved.x,
-              top: saved.y,
-              angle: saved.rotation,
-              visible: mine,
-              evented: mine,
-              selectable: mine,
-            });
-            // Faithful geometry for plain text: scale the measured natural box to the
-            // stored box, so validation sees exactly the saved rectangle even if
-            // metrics drifted. A Textbox already has the exact stored width and a
-            // self-consistent re-wrapped height; scaling it would change the wrap.
-            if (!isBox && itext.width && itext.height) {
-              itext.set({ scaleX: saved.width / itext.width, scaleY: saved.height / itext.height });
-            }
-            itext.setCoords();
-            canvas.add(itext);
-            canvas.requestRenderAll();
-            refreshAreaCounts();
-          });
-
+      const pending: Promise<void>[] = [];
       for (const placement of initialDesign.design.placements) {
         for (const saved of placement.objects) {
-          if (saved.type === 'text') {
-            void restoreText(saved, placement.printAreaKey);
-          } else {
-            void restoreImage(saved, placement.printAreaKey);
-          }
+          pending.push(
+            saved.type === 'text'
+              ? restoreTextObject(saved, placement.printAreaKey)
+              : restoreImageObject(saved, placement.printAreaKey),
+          );
         }
       }
+      // Undo's baseline is the restored design, not the empty canvas: the first
+      // undo after a reopen must revert the first EDIT, never wipe the design.
+      void Promise.allSettled(pending).then(() => {
+        if (!disposed) lastSnapshotRef.current = serializeStateRef.current();
+      });
     }
 
     const onMoving = (e: { target?: FabricObject }) => {
-      if (e.target) clampToPrintArea(e.target as DesignedObject);
+      if (!e.target) return;
+      // The crop rect clamps against ITS IMAGE, not the print area.
+      if ((e.target as { cropTag?: boolean }).cropTag) {
+        clampCropRectRef.current();
+        return;
+      }
+      clampToPrintArea(e.target as DesignedObject);
+      // Dragging a patterned tile re-phases its preview fill (cheap path).
+      if ((e.target as DesignedObject).pattern) {
+        patternHooksRef.current.offset(e.target as DesignedObject);
+      }
     };
     const onModified = (e: { target?: FabricObject }) => {
+      if (e.target && (e.target as { cropTag?: boolean }).cropTag) {
+        clampCropRectRef.current();
+        canvas.requestRenderAll();
+        return; // adjusting the crop frame is not a design mutation
+      }
       if (e.target) {
         clampTextScale(e.target as DesignedObject);
         fitToPrintArea(e.target as DesignedObject);
+        // Scaling changes the tile size: rebuild the preview's meta-tile.
+        if ((e.target as DesignedObject).pattern) {
+          patternHooksRef.current.refresh(e.target as DesignedObject);
+        }
         canvas.requestRenderAll();
         readSelection(e.target);
       }
-      setDirty(true); // edits make the saved design (and its previews) stale
+      markMutated(); // edits make the saved design (and its previews) stale
     };
     const onSelection = () => {
       boundaryRef.current?.set(BOUNDARY_ACTIVE);
@@ -772,7 +1264,7 @@ export function EditorClient({
         canvas.requestRenderAll();
         readSelection(e.target);
       }
-      setDirty(true);
+      markMutated();
     };
     // Live during typing: re-resolve 'auto' direction (first strong character may
     // have changed) and refresh the readout so the overflow warning tracks the
@@ -796,9 +1288,24 @@ export function EditorClient({
     canvas.on('text:changed', onTextChanged);
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       const target = event.target as HTMLElement | null;
       if (target && ['INPUT', 'TEXTAREA'].includes(target.tagName)) return;
+      // Inline text editing owns the keyboard (incl. its own ctrl+z behavior).
+      if ((canvas.getActiveObject() as IText | undefined)?.isEditing) return;
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) undoRedoRef.current.redo();
+        else undoRedoRef.current.undo();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        undoRedoRef.current.redo();
+        return;
+      }
+
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       removeActiveObject();
     };
     window.addEventListener('keydown', onKeyDown);
@@ -823,10 +1330,12 @@ export function EditorClient({
     clampToPrintArea,
     clampTextScale,
     fitToPrintArea,
-    makeDesignedText,
+    markMutated,
     readSelection,
     removeActiveObject,
     refreshAreaCounts,
+    restoreImageObject,
+    restoreTextObject,
   ]);
 
   // ---- view zoom: scale the viewport around the stage center ----
@@ -849,6 +1358,9 @@ export function EditorClient({
     const area = template.printAreas.find((a) => a.key === activeAreaKey);
     if (!canvasReady || !canvas || !boundary || !area) return;
 
+    // A crop in progress belongs to the side being left; abandon it cleanly.
+    cancelCropRef.current();
+
     let cancelled = false;
 
     // Boundary follows the active area; switching sides always lands in the quiet state
@@ -868,6 +1380,11 @@ export function EditorClient({
     for (const obj of designedObjects()) {
       const mine = obj.printAreaKey === area.key;
       obj.set({ visible: mine, evented: mine, selectable: mine });
+    }
+    // Pattern previews follow their area like the objects they belong to.
+    for (const o of canvas.getObjects()) {
+      const preview = o as PatternPreviewRect;
+      if (preview.patternPreview) preview.set({ visible: preview.printAreaKey === area.key });
     }
     canvas.discardActiveObject();
     setSelection(null);
@@ -889,9 +1406,14 @@ export function EditorClient({
     const overlayUrl = area.overlayUrl ?? template.overlayUrl;
     if (overlayUrl) {
       const overlayCacheKey = area.overlayUrl ? area.key : '';
+      // Blend follows the same area -> template fallback as the overlay asset. Set on
+      // every activation: the cached template-level image is shared across areas
+      // whose blends may differ.
+      const blend = FABRIC_OVERLAY_BLEND[area.overlayBlend ?? template.overlayBlend];
       loadViewImage(overlayCacheRef.current, overlayCacheKey, overlayUrl)
         .then((img) => {
           if (cancelled) return;
+          img.set({ globalCompositeOperation: blend });
           canvas.overlayImage = img;
           canvas.requestRenderAll();
         })
@@ -943,7 +1465,7 @@ export function EditorClient({
       canvas.requestRenderAll();
       readSelection(img);
       refreshAreaCounts();
-      setDirty(true);
+      markMutated();
       setStatus({
         tone: 'success',
         message: `${asset.originalFilename} added to ${area.name}. Drag, resize, and rotate it inside the print area.`,
@@ -959,6 +1481,262 @@ export function EditorClient({
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
+
+  /**
+   * Swaps the selected image for a server-derived copy with the flat background
+   * removed. Same pixel dimensions, so position/scale/rotation carry over exactly;
+   * the original upload stays intact (delete + re-upload is the undo).
+   */
+  const handleRemoveBackground = async () => {
+    const canvas = canvasRef.current;
+    const active = canvas?.getActiveObject() as (DesignedObject & FabricImage) | undefined;
+    if (!canvas || active?.kind !== 'image' || !active.assetId) return;
+    setBusy('removebg');
+    setStatus({ tone: 'info', message: 'Removing the background...' });
+    try {
+      const derived = await removeAssetBackground(active.assetId);
+      const img = (await FabricImage.fromURL(apiUrl(derived.url), {
+        crossOrigin: 'anonymous',
+      })) as DesignedObject & FabricImage;
+      img.set({
+        originX: 'center',
+        originY: 'center',
+        left: active.left,
+        top: active.top,
+        scaleX: active.scaleX,
+        scaleY: active.scaleY,
+        angle: active.angle,
+      });
+      applySelectionStyle(img);
+      img.kind = 'image';
+      img.assetId = derived.id;
+      img.printAreaKey = active.printAreaKey;
+      if (active.pattern) {
+        img.pattern = active.pattern;
+        img.set({ lockRotation: true });
+        img.setControlsVisibility({ mtr: false });
+      }
+      patternHooksRef.current.remove(active);
+      canvas.remove(active);
+      canvas.add(img);
+      if (img.pattern) patternHooksRef.current.refresh(img);
+      canvas.setActiveObject(img);
+      canvas.requestRenderAll();
+      readSelection(img);
+      refreshAreaCounts();
+      markMutated();
+      setStatus({ tone: 'success', message: 'Background removed. The original upload is untouched.' });
+    } catch (error) {
+      setStatus({
+        tone: 'error',
+        message: error instanceof ApiError ? error.message : 'Background removal failed.',
+        details: error instanceof ApiError ? error.details : undefined,
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * The crop rect's position in SOURCE pixel space: the canvas offset between the
+   * rect center and the image center, rotated into the image frame and divided by
+   * the image scale. Works for rotated images because the rect always carries the
+   * image's own angle.
+   */
+  const cropRectLocal = useCallback(() => {
+    const rect = cropRectRef.current;
+    const img = cropImageRef.current;
+    if (!rect || !img) return null;
+    const theta = (-(img.angle ?? 0) * Math.PI) / 180;
+    const dx = (rect.left ?? 0) - (img.left ?? 0);
+    const dy = (rect.top ?? 0) - (img.top ?? 0);
+    const u = dx * Math.cos(theta) - dy * Math.sin(theta);
+    const v = dx * Math.sin(theta) + dy * Math.cos(theta);
+    const sx = img.scaleX ?? 1;
+    const sy = img.scaleY ?? 1;
+    const srcW = img.width ?? 1;
+    const srcH = img.height ?? 1;
+    const width = rect.getScaledWidth() / sx;
+    const height = rect.getScaledHeight() / sy;
+    return {
+      srcW,
+      srcH,
+      left: u / sx + srcW / 2 - width / 2,
+      top: v / sy + srcH / 2 - height / 2,
+      width,
+      height,
+    };
+  }, []);
+
+  /** Clamps the crop rect inside the image (16px source-floor) and re-syncs its angle. */
+  const clampCropRect = useCallback(() => {
+    const rect = cropRectRef.current;
+    const img = cropImageRef.current;
+    const local = cropRectLocal();
+    if (!rect || !img || !local) return;
+    const width = Math.min(Math.max(local.width, 16), local.srcW);
+    const height = Math.min(Math.max(local.height, 16), local.srcH);
+    const left = Math.min(Math.max(local.left, 0), local.srcW - width);
+    const top = Math.min(Math.max(local.top, 0), local.srcH - height);
+    const sx = img.scaleX ?? 1;
+    const sy = img.scaleY ?? 1;
+    const theta = ((img.angle ?? 0) * Math.PI) / 180;
+    const u = (left + width / 2 - local.srcW / 2) * sx;
+    const v = (top + height / 2 - local.srcH / 2) * sy;
+    rect.set({
+      width: width * sx,
+      height: height * sy,
+      scaleX: 1,
+      scaleY: 1,
+      left: (img.left ?? 0) + u * Math.cos(theta) - v * Math.sin(theta),
+      top: (img.top ?? 0) + u * Math.sin(theta) + v * Math.cos(theta),
+      angle: img.angle ?? 0,
+    });
+    rect.setCoords();
+  }, [cropRectLocal]);
+  clampCropRectRef.current = clampCropRect;
+
+  /** Enters crop mode for the selected image: full-frame rect, image locked. */
+  const startCrop = useCallback(() => {
+    const canvas = canvasRef.current;
+    const active = canvas?.getActiveObject() as (DesignedObject & FabricImage) | undefined;
+    if (!canvas || active?.kind !== 'image' || !active.assetId || croppingRef.current) return;
+    const rect = new Rect({
+      originX: 'center',
+      originY: 'center',
+      left: active.left,
+      top: active.top,
+      width: active.getScaledWidth(),
+      height: active.getScaledHeight(),
+      angle: active.angle ?? 0,
+      fill: 'rgba(207, 63, 34, 0.10)',
+      stroke: '#cf3f22',
+      strokeDashArray: [6, 4],
+      strokeWidth: 1.5,
+      strokeUniform: true,
+      lockRotation: true,
+    }) as Rect & { cropTag?: boolean };
+    rect.cropTag = true;
+    rect.setControlsVisibility({ mtr: false });
+    applySelectionStyle(rect);
+    active.set({ selectable: false, evented: false });
+    cropImageRef.current = active;
+    cropRectRef.current = rect;
+    canvas.add(rect);
+    canvas.setActiveObject(rect);
+    canvas.requestRenderAll();
+    setCropping(true);
+    setObjectTool(null);
+  }, []);
+
+  /** Leaves crop mode without touching the image. */
+  const cancelCrop = useCallback(() => {
+    const canvas = canvasRef.current;
+    const rect = cropRectRef.current;
+    const img = cropImageRef.current;
+    cropRectRef.current = null;
+    cropImageRef.current = null;
+    setCropping(false);
+    if (!canvas) return;
+    if (rect) canvas.remove(rect);
+    if (img) {
+      img.set({ selectable: true, evented: true });
+      canvas.setActiveObject(img);
+    }
+    canvas.requestRenderAll();
+  }, []);
+  cancelCropRef.current = cancelCrop;
+
+  /**
+   * Applies the crop: derives a new asset for the source-space rect and swaps the
+   * object so the kept region stays exactly where it was on the garment.
+   */
+  const applyCrop = useCallback(async () => {
+    const canvas = canvasRef.current;
+    const img = cropImageRef.current;
+    const local = cropRectLocal();
+    if (!canvas || !img?.assetId || !local) return;
+
+    const rect = {
+      left: Math.max(0, Math.round(local.left)),
+      top: Math.max(0, Math.round(local.top)),
+      width: Math.round(local.width),
+      height: Math.round(local.height),
+    };
+    rect.width = Math.min(rect.width, Math.round(local.srcW) - rect.left);
+    rect.height = Math.min(rect.height, Math.round(local.srcH) - rect.top);
+    if (rect.width < 16 || rect.height < 16) {
+      setStatus({ tone: 'error', message: 'Crop area is too small; keep at least 16px per side.' });
+      return;
+    }
+    // Full frame selected = nothing to crop.
+    if (
+      rect.left === 0 &&
+      rect.top === 0 &&
+      rect.width >= Math.round(local.srcW) &&
+      rect.height >= Math.round(local.srcH)
+    ) {
+      cancelCrop();
+      return;
+    }
+
+    setBusy('crop');
+    setStatus({ tone: 'info', message: 'Cropping...' });
+    try {
+      const derived = await cropAsset(img.assetId, rect);
+      const newImg = (await FabricImage.fromURL(apiUrl(derived.url), {
+        crossOrigin: 'anonymous',
+      })) as DesignedObject & FabricImage;
+      const sx = img.scaleX ?? 1;
+      const sy = img.scaleY ?? 1;
+      const theta = ((img.angle ?? 0) * Math.PI) / 180;
+      const u = (rect.left + rect.width / 2 - local.srcW / 2) * sx;
+      const v = (rect.top + rect.height / 2 - local.srcH / 2) * sy;
+      newImg.set({
+        originX: 'center',
+        originY: 'center',
+        left: (img.left ?? 0) + u * Math.cos(theta) - v * Math.sin(theta),
+        top: (img.top ?? 0) + u * Math.sin(theta) + v * Math.cos(theta),
+        scaleX: sx,
+        scaleY: sy,
+        angle: img.angle ?? 0,
+      });
+      applySelectionStyle(newImg);
+      newImg.kind = 'image';
+      newImg.assetId = derived.id;
+      newImg.printAreaKey = img.printAreaKey;
+      if (img.pattern) {
+        newImg.pattern = img.pattern;
+        newImg.set({ lockRotation: true });
+        newImg.setControlsVisibility({ mtr: false });
+      }
+
+      const cropRect = cropRectRef.current;
+      cropRectRef.current = null;
+      cropImageRef.current = null;
+      setCropping(false);
+      if (cropRect) canvas.remove(cropRect);
+      patternHooksRef.current.remove(img);
+      canvas.remove(img);
+      canvas.add(newImg);
+      if (newImg.pattern) patternHooksRef.current.refresh(newImg);
+      canvas.setActiveObject(newImg);
+      canvas.requestRenderAll();
+      readSelection(newImg);
+      refreshAreaCounts();
+      markMutated();
+      setStatus({ tone: 'success', message: 'Cropped. The original upload is untouched.' });
+    } catch (error) {
+      setStatus({
+        tone: 'error',
+        message: error instanceof ApiError ? error.message : 'Crop failed.',
+        details: error instanceof ApiError ? error.details : undefined,
+      });
+      cancelCrop();
+    } finally {
+      setBusy(null);
+    }
+  }, [cropRectLocal, cancelCrop, readSelection, refreshAreaCounts, markMutated]);
 
   /** Adds an editable text object centered in the active print area. */
   const handleAddText = async () => {
@@ -980,7 +1758,7 @@ export function EditorClient({
     canvas.requestRenderAll();
     readSelection(itext);
     refreshAreaCounts();
-    setDirty(true);
+    markMutated();
     setStatus({
       tone: 'success',
       message: `Text added to ${area.name}. Double-click it to edit the wording.`,
@@ -999,14 +1777,20 @@ export function EditorClient({
       fitToPrintArea(active);
       canvas.requestRenderAll();
       readSelection(active);
-      setDirty(true);
+      markMutated();
     },
-    [clampTextScale, fitToPrintArea, readSelection],
+    [clampTextScale, fitToPrintArea, readSelection, markMutated],
   );
 
   /** The contextual tool follows the selection; no selection, no tool panel. */
   useEffect(() => {
     if (!selection) setObjectTool(null);
+  }, [selection]);
+
+  /** Sync the arc wording input to the active arc-text selection. */
+  useEffect(() => {
+    const active = canvasRef.current?.getActiveObject() as DesignedObject | undefined;
+    if (isArcText(active)) setArcWording(active.arcProps.text);
   }, [selection]);
 
   /**
@@ -1025,9 +1809,9 @@ export function EditorClient({
       fitToPrintArea(active);
       canvas.requestRenderAll();
       readSelection(active);
-      setDirty(true);
+      markMutated();
     },
-    [clampTextScale, fitToPrintArea, readSelection],
+    [clampTextScale, fitToPrintArea, readSelection, markMutated],
   );
 
   /**
@@ -1064,6 +1848,130 @@ export function EditorClient({
         obj.set({ left: (obj.left ?? 0) + dx, top: (obj.top ?? 0) + dy });
       }),
     [updateActiveObject, areaOf],
+  );
+
+  /**
+   * Enables/disables the tiling fill on the selected image (v1.9). Patterned tiles
+   * are axis-aligned: rotation resets to 0 and the rotate handle is hidden; the
+   * server rejects rotated patterns.
+   */
+  const setImagePattern = useCallback(
+    (pattern: ImagePattern | null) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'image') return;
+      if (pattern) {
+        active.pattern = pattern;
+        active.set({ angle: 0, lockRotation: true });
+        active.setControlsVisibility({ mtr: false });
+      } else {
+        delete active.pattern;
+        active.set({ lockRotation: false });
+        active.setControlsVisibility({ mtr: true });
+      }
+      active.setCoords();
+      fitToPrintArea(active);
+      refreshPatternPreview(active);
+      canvas.requestRenderAll();
+      readSelection(active);
+      markMutated();
+    },
+    [fitToPrintArea, refreshPatternPreview, readSelection, markMutated],
+  );
+
+  /**
+   * Rebuilds the selected arced-text image from changed props (font, color, size,
+   * align, spacing, or arc value). Preserves center/angle and re-fits to the area.
+   */
+  const setArcProps = useCallback(
+    (partial: Partial<ArcTextProps>) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || !isArcText(active)) return;
+      const replacement = makeArcText(
+        { ...active.arcProps, ...partial },
+        active.printAreaKey ?? activeAreaKeyRef.current,
+      );
+      if (!replacement) return;
+      replacement.set({ left: active.left, top: active.top, angle: active.angle });
+      canvas.remove(active);
+      replacement.setCoords();
+      fitToPrintArea(replacement);
+      canvas.add(replacement);
+      canvas.setActiveObject(replacement);
+      canvas.requestRenderAll();
+      readSelection(replacement);
+      markMutated();
+    },
+    [makeArcText, fitToPrintArea, readSelection, markMutated],
+  );
+
+  /**
+   * Toggles/sets the arc on the selected text. null straightens it back to an
+   * IText; a number bends a straight IText (or re-bends an existing arc). Arc text
+   * is LTR single-line with no wrap/outline/shadow, so the conversions strip those.
+   */
+  const setArc = useCallback(
+    (arc: number | null) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'text') return;
+
+      if (isArcText(active)) {
+        if (arc === null) {
+          // Arc -> straight IText, baking the display scale into the props.
+          const scale = active.scaleY ?? 1;
+          const p = active.arcProps;
+          const itext = makeDesignedText(p.text, active.printAreaKey ?? activeAreaKeyRef.current, {
+            fontKey: p.fontKey,
+            fontSize: Math.min(Math.max(p.fontSize * scale, FONT_SIZE_MIN), FONT_SIZE_MAX),
+            color: p.color,
+            align: p.align,
+            direction: 'auto',
+            letterSpacing: p.letterSpacing * scale || undefined,
+          });
+          itext.set({ left: active.left, top: active.top, angle: active.angle });
+          canvas.remove(active);
+          itext.setCoords();
+          fitToPrintArea(itext);
+          canvas.add(itext);
+          canvas.setActiveObject(itext);
+          canvas.requestRenderAll();
+          readSelection(itext);
+          markMutated();
+        } else {
+          setArcProps({ arc });
+        }
+        return;
+      }
+
+      if (arc === null) return; // already straight
+      // Straight IText -> arc image. Wrap boxes can't arc (guarded in the UI).
+      const t = active as DesignedText;
+      if (t instanceof Textbox) return;
+      const scale = t.scaleY ?? 1;
+      const props: ArcTextProps = {
+        text: (t.text ?? 'Your text').replace(/\n+/g, ' '),
+        fontKey: t.fontKey ?? TEXT_DEFAULTS.fontKey,
+        fontSize: Math.min(Math.max((t.fontSize ?? TEXT_DEFAULTS.fontSize) * scale, FONT_SIZE_MIN), FONT_SIZE_MAX),
+        color: typeof t.fill === 'string' ? t.fill : TEXT_DEFAULTS.color,
+        align: (t.textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+        letterSpacing: ((t.charSpacing ?? 0) / 1000) * (t.fontSize ?? TEXT_DEFAULTS.fontSize) * scale,
+        arc,
+      };
+      const replacement = makeArcText(props, t.printAreaKey ?? activeAreaKeyRef.current);
+      if (!replacement) return;
+      replacement.set({ left: t.left, top: t.top, angle: t.angle });
+      canvas.remove(t);
+      replacement.setCoords();
+      fitToPrintArea(replacement);
+      canvas.add(replacement);
+      canvas.setActiveObject(replacement);
+      canvas.requestRenderAll();
+      readSelection(replacement);
+      markMutated();
+    },
+    [makeArcText, makeDesignedText, fitToPrintArea, readSelection, markMutated, setArcProps],
   );
 
   /** Sets the contract direction and re-resolves Fabric's rendered direction. */
@@ -1104,6 +2012,21 @@ export function EditorClient({
         direction: t.textDirection ?? 'auto',
         wrap,
         width: wrap ? t.getScaledWidth() : undefined,
+        // Carry the v1.8 effects across the IText <-> Textbox swap.
+        outline:
+          typeof t.stroke === 'string' && (t.strokeWidth ?? 0) > 0
+            ? { color: t.stroke, width: t.strokeWidth ?? 1 }
+            : undefined,
+        shadow:
+          t.shadow && typeof t.shadow === 'object'
+            ? {
+                color: typeof t.shadow.color === 'string' ? t.shadow.color : '#000000',
+                offsetX: t.shadow.offsetX ?? 0,
+                offsetY: t.shadow.offsetY ?? 0,
+              }
+            : undefined,
+        letterSpacing:
+          ((t.charSpacing ?? 0) / 1000) * bakedSize || undefined,
       });
       replacement.set({ left: t.left, top: t.top, angle: t.angle });
       canvas.remove(t);
@@ -1114,9 +2037,9 @@ export function EditorClient({
       canvas.requestRenderAll();
       readSelection(replacement);
       refreshAreaCounts();
-      setDirty(true);
+      markMutated();
     },
-    [makeDesignedText, fitToPrintArea, readSelection, refreshAreaCounts],
+    [makeDesignedText, fitToPrintArea, readSelection, refreshAreaCounts, markMutated],
   );
 
   /**
@@ -1129,9 +2052,78 @@ export function EditorClient({
       if (!obj.printAreaKey) continue;
 
       let serialized: DesignObject | null = null;
+      if (isArcText(obj)) {
+        // Arced text: a tagged image; emit a text object with arc. Scale bakes
+        // into fontSize/letterSpacing, the box is the displayed raster box.
+        const scale = obj.scaleY ?? 1;
+        const p = obj.arcProps;
+        serialized = {
+          type: 'text',
+          text: p.text,
+          fontFamily: p.fontKey,
+          fontSize: Math.min(Math.max(p.fontSize * scale, FONT_SIZE_MIN), FONT_SIZE_MAX),
+          color: p.color,
+          align: p.align,
+          direction: 'ltr',
+          wrapMode: 'none',
+          arc: p.arc,
+          ...(p.letterSpacing
+            ? {
+                letterSpacing: Math.min(
+                  Math.max(p.letterSpacing * scale, LETTER_SPACING_MIN),
+                  LETTER_SPACING_MAX,
+                ),
+              }
+            : {}),
+          x: obj.left ?? 0,
+          y: obj.top ?? 0,
+          width: obj.getScaledWidth(),
+          height: obj.getScaledHeight(),
+          rotation: (obj.angle ?? 0) % 360,
+        };
+        const list = byArea.get(obj.printAreaKey) ?? [];
+        list.push(serialized);
+        byArea.set(obj.printAreaKey, list);
+        continue;
+      }
       if (obj.kind === 'text') {
         const t = obj as DesignedText;
         const isBox = t instanceof Textbox;
+        const scale = t.scaleY ?? 1;
+        // Effects bake the interactive scale like fontSize does, then clamp to the
+        // contract bounds so a corner-scaled object can never serialize out of range.
+        const outline =
+          typeof t.stroke === 'string' && (t.strokeWidth ?? 0) > 0
+            ? {
+                color: t.stroke,
+                width: Math.min(
+                  Math.max((t.strokeWidth ?? 1) * scale, OUTLINE_WIDTH_MIN),
+                  OUTLINE_WIDTH_MAX,
+                ),
+              }
+            : undefined;
+        const clampOffset = (v: number) =>
+          Math.min(Math.max(v * scale, -SHADOW_OFFSET_MAX), SHADOW_OFFSET_MAX);
+        const shadowOffsetX = clampOffset(t.shadow?.offsetX ?? 0);
+        const shadowOffsetY = clampOffset(t.shadow?.offsetY ?? 0);
+        // A both-zero offset is an invisible shadow; the contract rejects it, so
+        // it simply serializes as "no shadow".
+        const shadow =
+          t.shadow && typeof t.shadow === 'object' && (shadowOffsetX !== 0 || shadowOffsetY !== 0)
+            ? {
+                color: typeof t.shadow.color === 'string' ? t.shadow.color : '#000000',
+                offsetX: shadowOffsetX,
+                offsetY: shadowOffsetY,
+              }
+            : undefined;
+        // em-based charSpacing -> contract px at the baked size; 0 = field omitted.
+        const letterSpacing = Math.min(
+          Math.max(
+            ((t.charSpacing ?? 0) / 1000) * (t.fontSize ?? TEXT_DEFAULTS.fontSize) * scale,
+            LETTER_SPACING_MIN,
+          ),
+          LETTER_SPACING_MAX,
+        );
         serialized = {
           type: 'text',
           text: (t.text ?? '').replace(/\r\n?/g, '\n'),
@@ -1148,6 +2140,9 @@ export function EditorClient({
           // flattened); the server renders these verbatim and verifies they
           // reconcile with the raw text. Regenerated on every save, never edited.
           ...(isBox ? { wrappedLines: [...t.textLines] } : {}),
+          ...(outline ? { outline } : {}),
+          ...(shadow ? { shadow } : {}),
+          ...(letterSpacing !== 0 ? { letterSpacing } : {}),
           x: t.left ?? 0,
           y: t.top ?? 0,
           width: t.getScaledWidth(),
@@ -1158,6 +2153,7 @@ export function EditorClient({
         serialized = {
           type: 'image',
           assetId: obj.assetId,
+          ...(obj.pattern ? { pattern: obj.pattern } : {}),
           x: obj.left ?? 0,
           y: obj.top ?? 0,
           width: obj.getScaledWidth(),
@@ -1176,6 +2172,85 @@ export function EditorClient({
       .filter((a) => byArea.has(a.key))
       .map((a) => ({ printAreaKey: a.key, objects: byArea.get(a.key)! }));
   }, [designedObjects, template.printAreas]);
+
+  // ---- undo/redo engine (wires the late-bound refs declared above) ----
+
+  const serializeState = useCallback(() => JSON.stringify(collectPlacements()), [collectPlacements]);
+  serializeStateRef.current = serializeState;
+
+  /** Pushes the pre-mutation state onto the undo stack; called via markMutated. */
+  const recordHistory = useCallback(() => {
+    if (restoringRef.current) return;
+    const next = serializeState();
+    if (next === lastSnapshotRef.current) return; // no geometric/content change
+    undoStackRef.current.push(lastSnapshotRef.current);
+    if (undoStackRef.current.length > 50) undoStackRef.current.shift();
+    redoStackRef.current = [];
+    lastSnapshotRef.current = next;
+    setHistoryVersion((v) => v + 1);
+  }, [serializeState]);
+  markMutatedRef.current = () => {
+    setDirty(true);
+    recordHistory();
+  };
+
+  /** Clears the design objects and rebuilds them from a placements snapshot. */
+  const applySnapshot = useCallback(
+    async (snapshot: string) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      restoringRef.current = true;
+      try {
+        const placements = JSON.parse(snapshot) as DesignPlacement[];
+        canvas.discardActiveObject();
+        for (const obj of designedObjects()) canvas.remove(obj);
+        // Pattern previews belong to the removed objects; drop them all.
+        for (const o of [...canvas.getObjects()]) {
+          if ((o as PatternPreviewRect).patternPreview) canvas.remove(o);
+        }
+        setSelection(null);
+        const pending: Promise<void>[] = [];
+        for (const placement of placements) {
+          for (const saved of placement.objects) {
+            pending.push(
+              saved.type === 'text'
+                ? restoreTextObject(saved, placement.printAreaKey)
+                : restoreImageObject(saved, placement.printAreaKey),
+            );
+          }
+        }
+        await Promise.allSettled(pending);
+        canvas.requestRenderAll();
+        refreshAreaCounts();
+      } finally {
+        restoringRef.current = false;
+      }
+    },
+    [designedObjects, restoreImageObject, restoreTextObject, refreshAreaCounts],
+  );
+
+  const undo = useCallback(async () => {
+    if (croppingRef.current) return; // resolve the crop first
+    if (busyRef.current || restoringRef.current || undoStackRef.current.length === 0) return;
+    const previous = undoStackRef.current.pop()!;
+    redoStackRef.current.push(lastSnapshotRef.current);
+    lastSnapshotRef.current = previous;
+    setHistoryVersion((v) => v + 1);
+    await applySnapshot(previous);
+    setDirty(true); // differs from what the server has until the next save
+  }, [applySnapshot]);
+
+  const redo = useCallback(async () => {
+    if (croppingRef.current) return; // resolve the crop first
+    if (busyRef.current || restoringRef.current || redoStackRef.current.length === 0) return;
+    const next = redoStackRef.current.pop()!;
+    undoStackRef.current.push(lastSnapshotRef.current);
+    lastSnapshotRef.current = next;
+    setHistoryVersion((v) => v + 1);
+    await applySnapshot(next);
+    setDirty(true);
+  }, [applySnapshot]);
+  undoRedoRef.current = { undo: () => void undo(), redo: () => void redo() };
 
   const areaName = useCallback(
     (key: string) => template.printAreas.find((a) => a.key === key)?.name ?? key,
@@ -1369,7 +2444,29 @@ export function EditorClient({
       </div>
       {selection.text && (
         <div className="text-panel" data-testid="text-panel">
-          <p className="text-panel__hint">Double-click the text on the canvas to edit the wording.</p>
+          <p className="text-panel__hint">
+            {selection.text.arc !== null
+              ? 'Edit the curved wording in the field below.'
+              : 'Double-click the text on the canvas to edit the wording.'}
+          </p>
+          {selection.text.arc !== null && (
+            <label className="text-panel__field">
+              Wording
+              <input
+                type="text"
+                data-testid="arc-text-input"
+                value={selection.text.arc !== null ? arcWording : ''}
+                onChange={(e) => setArcWording(e.target.value)}
+                onBlur={() => {
+                  const next = arcWording.trim() || 'Your text';
+                  setArcProps({ text: next });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+              />
+            </label>
+          )}
           <label className="text-panel__field">
             Font
             <select
@@ -1379,6 +2476,10 @@ export function EditorClient({
                 const key = e.target.value;
                 const family = fontDefinitionOf(key)?.family;
                 if (!family) return;
+                if (selection.text!.arc !== null) {
+                  setArcProps({ fontKey: key });
+                  return;
+                }
                 updateActiveText((t) => {
                   t.fontKey = key;
                   t.set({ fontFamily: family });
@@ -1403,7 +2504,11 @@ export function EditorClient({
                   data-testid={`text-swatch-${swatch.slice(1)}`}
                   style={{ background: swatch }}
                   aria-label={`Text color ${swatch}`}
-                  onClick={() => updateActiveText((t) => t.set({ fill: swatch }))}
+                  onClick={() =>
+                    selection.text!.arc !== null
+                      ? setArcProps({ color: swatch })
+                      : updateActiveText((t) => t.set({ fill: swatch }))
+                  }
                 />
               ))}
               <input
@@ -1412,6 +2517,10 @@ export function EditorClient({
                 value={selection.text.color}
                 onChange={(e) => {
                   const color = e.target.value; // native input always emits #rrggbb
+                  if (selection.text!.arc !== null) {
+                    setArcProps({ color });
+                    return;
+                  }
                   updateActiveText((t) => t.set({ fill: color }));
                 }}
               />
@@ -1429,9 +2538,37 @@ export function EditorClient({
                 const size = Number(e.target.value);
                 if (!Number.isFinite(size)) return;
                 const clamped = Math.min(Math.max(size, FONT_SIZE_MIN), FONT_SIZE_MAX);
+                if (selection.text!.arc !== null) {
+                  setArcProps({ fontSize: clamped });
+                  return;
+                }
                 updateActiveText((t) => {
                   // Reset any interactive scale so the typed size IS the size.
                   t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
+                });
+              }}
+            />
+          </label>
+          <label className="text-panel__field">
+            Letter spacing
+            <input
+              type="number"
+              data-testid="text-letter-spacing-input"
+              min={LETTER_SPACING_MIN}
+              max={LETTER_SPACING_MAX}
+              value={Math.round(selection.text.letterSpacing)}
+              onChange={(e) => {
+                const px = Number(e.target.value);
+                if (!Number.isFinite(px)) return;
+                const clamped = Math.min(Math.max(px, LETTER_SPACING_MIN), LETTER_SPACING_MAX);
+                if (selection.text!.arc !== null) {
+                  setArcProps({ letterSpacing: clamped });
+                  return;
+                }
+                updateActiveText((t) => {
+                  // Target px at the current effective size -> em-based charSpacing.
+                  const effective = (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1);
+                  t.set({ charSpacing: (clamped * 1000) / effective });
                 });
               }}
             />
@@ -1449,13 +2586,69 @@ export function EditorClient({
                       ? 'btn btn--ghost btn--small btn--active'
                       : 'btn btn--ghost btn--small'
                   }
-                  onClick={() => updateActiveText((t) => t.set({ textAlign: align }))}
+                  onClick={() =>
+                    selection.text!.arc !== null
+                      ? setArcProps({ align })
+                      : updateActiveText((t) => t.set({ textAlign: align }))
+                  }
                 >
                   {align}
                 </button>
               ))}
             </div>
           </div>
+          <div className="text-panel__field" role="group" aria-label="Text curve">
+            Curve
+            <div className="text-panel__align">
+              <button
+                type="button"
+                data-testid="text-arc-none"
+                className={
+                  selection.text.arc === null
+                    ? 'btn btn--ghost btn--small btn--active'
+                    : 'btn btn--ghost btn--small'
+                }
+                onClick={() => setArc(null)}
+              >
+                none
+              </button>
+              <button
+                type="button"
+                data-testid="text-arc-toggle"
+                className={
+                  selection.text.arc !== null
+                    ? 'btn btn--ghost btn--small btn--active'
+                    : 'btn btn--ghost btn--small'
+                }
+                disabled={selection.text.wrap}
+                title={selection.text.wrap ? 'Turn off wrap to curve text' : undefined}
+                onClick={() => setArc(selection.text!.arc ?? 90)}
+              >
+                arc
+              </button>
+            </div>
+          </div>
+          {selection.text.arc !== null && (
+            <div className="text-panel__field">
+              Bend
+              <input
+                type="range"
+                data-testid="text-arc-slider"
+                min={ARC_SWEEP_MIN}
+                max={ARC_SWEEP_MAX}
+                step={5}
+                value={selection.text.arc}
+                aria-label="Arc bend in degrees"
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  if (!Number.isFinite(value) || value === 0) return;
+                  setArc(value);
+                }}
+              />
+            </div>
+          )}
+          {selection.text.arc === null && (
+          <>
           <div className="text-panel__field" role="group" aria-label="Text direction">
             Direction
             <div className="text-panel__align">
@@ -1491,7 +2684,111 @@ export function EditorClient({
             </span>
             <small>Side handles set the box width; text reflows inside it.</small>
           </label>
-          {selection.text.lineCount > TEXT_MAX_LINES && (
+          <div className="text-panel__field text-panel__effect" data-testid="text-outline-section">
+            <label>
+              <input
+                type="checkbox"
+                data-testid="text-outline-toggle"
+                checked={Boolean(selection.text.outline)}
+                onChange={(e) =>
+                  updateActiveText((t) =>
+                    e.target.checked
+                      ? t.set({
+                          stroke: '#ffffff',
+                          strokeWidth: 4,
+                          paintFirst: 'stroke',
+                          strokeLineJoin: 'round',
+                        })
+                      : t.set({ stroke: undefined, strokeWidth: 0 }),
+                  )
+                }
+              />{' '}
+              Outline
+            </label>
+            {selection.text.outline && (
+              <div className="text-panel__effect-row">
+                <input
+                  type="color"
+                  data-testid="text-outline-color"
+                  value={selection.text.outline.color}
+                  onChange={(e) => {
+                    const color = e.target.value;
+                    updateActiveText((t) => t.set({ stroke: color }));
+                  }}
+                />
+                <input
+                  type="number"
+                  data-testid="text-outline-width"
+                  min={OUTLINE_WIDTH_MIN}
+                  max={OUTLINE_WIDTH_MAX}
+                  value={Math.round(selection.text.outline.width)}
+                  aria-label="Outline width"
+                  onChange={(e) => {
+                    const width = Number(e.target.value);
+                    if (!Number.isFinite(width)) return;
+                    const clamped = Math.min(Math.max(width, OUTLINE_WIDTH_MIN), OUTLINE_WIDTH_MAX);
+                    updateActiveText((t) => t.set({ strokeWidth: clamped }));
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          <div className="text-panel__field text-panel__effect" data-testid="text-shadow-section">
+            <label>
+              <input
+                type="checkbox"
+                data-testid="text-shadow-toggle"
+                checked={Boolean(selection.text.shadow)}
+                onChange={(e) =>
+                  updateActiveText((t) => {
+                    t.shadow = e.target.checked
+                      ? new Shadow({ color: '#000000', offsetX: 4, offsetY: 4, blur: 0 })
+                      : null;
+                  })
+                }
+              />{' '}
+              Shadow
+            </label>
+            {selection.text.shadow && (
+              <div className="text-panel__effect-row">
+                <input
+                  type="color"
+                  data-testid="text-shadow-color"
+                  value={selection.text.shadow.color}
+                  onChange={(e) => {
+                    const color = e.target.value;
+                    updateActiveText((t) => {
+                      if (t.shadow) t.shadow.color = color;
+                    });
+                  }}
+                />
+                {(['offsetX', 'offsetY'] as const).map((axis) => (
+                  <input
+                    key={axis}
+                    type="number"
+                    data-testid={`text-shadow-${axis === 'offsetX' ? 'x' : 'y'}`}
+                    min={-SHADOW_OFFSET_MAX}
+                    max={SHADOW_OFFSET_MAX}
+                    // Non-null: this row only renders inside the shadow guard above;
+                    // TS just cannot see through the map callback.
+                    value={Math.round(selection.text!.shadow![axis])}
+                    aria-label={`Shadow ${axis}`}
+                    onChange={(e) => {
+                      const value = Number(e.target.value);
+                      if (!Number.isFinite(value)) return;
+                      const clamped = Math.min(Math.max(value, -SHADOW_OFFSET_MAX), SHADOW_OFFSET_MAX);
+                      updateActiveText((t) => {
+                        if (t.shadow) t.shadow[axis] = clamped;
+                      });
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          </>
+          )}
+          {selection.text.arc === null && selection.text.lineCount > TEXT_MAX_LINES && (
             <p
               className="text-panel__warning"
               role="alert"
@@ -1549,14 +2846,29 @@ export function EditorClient({
           </div>
         )}
         <div className="studio__topbar-spacer" />
-        <div className="studio__history">
-          <button type="button" disabled title="Undo (coming soon)" aria-label="Undo">
+        {/* data-history-version ties the buttons' disabled state to stack changes. */}
+        <div className="studio__history" data-history-version={historyVersion}>
+          <button
+            type="button"
+            data-testid="undo-button"
+            disabled={busy !== null || undoStackRef.current.length === 0}
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo"
+            onClick={() => void undo()}
+          >
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M8 5L3 10l5 5" />
               <path d="M3 10h11a6 6 0 0 1 0 12h-3" />
             </svg>
           </button>
-          <button type="button" disabled title="Redo (coming soon)" aria-label="Redo">
+          <button
+            type="button"
+            data-testid="redo-button"
+            disabled={busy !== null || redoStackRef.current.length === 0}
+            title="Redo (Ctrl+Y)"
+            aria-label="Redo"
+            onClick={() => void redo()}
+          >
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M16 5l5 5-5 5" />
               <path d="M21 10H10a6 6 0 0 0 0 12h3" />
@@ -1607,7 +2919,7 @@ export function EditorClient({
               <p className="studio__panel-title">Product</p>
               <div className="studio__panel-product">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(template.imageUrl)} alt={template.name} width={56} height={56} />
+                <img src={apiUrl(template.thumbUrl ?? template.imageUrl)} alt={template.name} width={56} height={56} />
                 <div>
                   <b>{template.name}</b>
                   <span>
@@ -1760,14 +3072,44 @@ export function EditorClient({
         </aside>
 
         <section className="studio__stage" aria-label="Design workspace">
-          {selection && (
+          {cropping && (
+            <div
+              className="studio__context-bar"
+              role="toolbar"
+              aria-label="Crop"
+              data-testid="crop-toolbar"
+            >
+              <button
+                type="button"
+                className="studio__context-tool"
+                data-testid="crop-cancel"
+                disabled={busy !== null}
+                onClick={cancelCrop}
+              >
+                <span>Cancel</span>
+              </button>
+              <button
+                type="button"
+                className="studio__context-tool studio__context-tool--active"
+                data-testid="crop-apply"
+                disabled={busy !== null}
+                onClick={() => void applyCrop()}
+              >
+                <span>{busy === 'crop' ? 'Cropping...' : 'Apply crop'}</span>
+              </button>
+            </div>
+          )}
+          {selection && !cropping && (
             <div
               className="studio__context-bar"
               role="toolbar"
               aria-label="Object tools"
               data-testid="context-toolbar"
             >
-              {(['transform', 'position'] as const).map((key) => (
+              {(selection.kind === 'image'
+                ? (['transform', 'position', 'pattern'] as const)
+                : (['transform', 'position'] as const)
+              ).map((key) => (
                 <button
                   key={key}
                   type="button"
@@ -1781,16 +3123,47 @@ export function EditorClient({
                   onClick={() => setObjectTool((open) => (open === key ? null : key))}
                 >
                   {CONTEXT_TOOL_ICONS[key]}
-                  <span>{key === 'transform' ? 'Transform' : 'Position'}</span>
+                  <span>
+                    {key === 'transform' ? 'Transform' : key === 'position' ? 'Position' : 'Pattern'}
+                  </span>
                 </button>
               ))}
+              {selection.kind === 'image' && (
+                <>
+                  <button
+                    type="button"
+                    data-testid="context-tool-crop"
+                    className="studio__context-tool"
+                    disabled={busy !== null}
+                    onClick={startCrop}
+                  >
+                    {CONTEXT_TOOL_ICONS.crop}
+                    <span>Crop</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="context-tool-remove-bg"
+                    className="studio__context-tool"
+                    disabled={busy !== null}
+                    onClick={() => void handleRemoveBackground()}
+                  >
+                    {CONTEXT_TOOL_ICONS['remove-bg']}
+                    <span>{busy === 'removebg' ? 'Removing...' : 'Remove background'}</span>
+                  </button>
+                </>
+              )}
             </div>
           )}
 
           {selection && objectTool === 'transform' && (
             <div className="studio__object-panel" data-testid="object-panel-transform">
               <p className="studio__object-panel-title">Rotate</p>
-              <div className="studio__rotate-row">
+              {selection.pattern && (
+                <p style={{ margin: '0 0 8px', fontSize: 12.5 }}>
+                  Patterned tiles are axis-aligned; turn the pattern off to rotate.
+                </p>
+              )}
+              <div className="studio__rotate-row" style={selection.pattern ? { display: 'none' } : undefined}>
                 <input
                   type="range"
                   min={0}
@@ -1814,6 +3187,71 @@ export function EditorClient({
                   }}
                 />
               </div>
+            </div>
+          )}
+
+          {selection && objectTool === 'pattern' && (
+            <div className="studio__object-panel" data-testid="object-panel-pattern">
+              <p className="studio__object-panel-title">Pattern</p>
+              <div className="studio__align-row" role="group" aria-label="Pattern type">
+                {PATTERN_CHOICES.map((choice) => (
+                  <button
+                    key={choice.label}
+                    type="button"
+                    className={
+                      (selection.pattern?.type ?? null) === choice.key
+                        ? 'studio__context-tool studio__context-tool--active'
+                        : 'studio__context-tool'
+                    }
+                    data-testid={`pattern-type-${choice.key ?? 'none'}`}
+                    onClick={() =>
+                      setImagePattern(
+                        choice.key
+                          ? { type: choice.key, spacing: selection.pattern?.spacing ?? 0 }
+                          : null,
+                      )
+                    }
+                  >
+                    <span>{choice.label}</span>
+                  </button>
+                ))}
+              </div>
+              {selection.pattern && (
+                <div className="studio__rotate-row" style={{ marginTop: 10 }}>
+                  <span style={{ fontSize: 12.5 }}>Spacing</span>
+                  <input
+                    type="range"
+                    min={PATTERN_SPACING_MIN}
+                    max={PATTERN_SPACING_MAX}
+                    step={1}
+                    value={Math.round(selection.pattern.spacing)}
+                    data-testid="pattern-spacing-slider"
+                    aria-label="Pattern spacing"
+                    onChange={(e) => {
+                      const spacing = Number(e.target.value);
+                      if (!Number.isFinite(spacing) || !selection.pattern) return;
+                      setImagePattern({ type: selection.pattern.type, spacing });
+                    }}
+                  />
+                  <input
+                    type="number"
+                    min={PATTERN_SPACING_MIN}
+                    max={PATTERN_SPACING_MAX}
+                    value={Math.round(selection.pattern.spacing)}
+                    data-testid="pattern-spacing-input"
+                    aria-label="Pattern spacing"
+                    onChange={(e) => {
+                      const spacing = Number(e.target.value);
+                      if (!Number.isFinite(spacing) || !selection.pattern) return;
+                      const clamped = Math.min(
+                        Math.max(spacing, PATTERN_SPACING_MIN),
+                        PATTERN_SPACING_MAX,
+                      );
+                      setImagePattern({ type: selection.pattern.type, spacing: clamped });
+                    }}
+                  />
+                </div>
+              )}
             </div>
           )}
 
@@ -1912,7 +3350,7 @@ export function EditorClient({
             >
               <span className="area-tab__thumb">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
+                <img src={apiUrl(a.thumbUrl ?? template.thumbUrl ?? a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
               </span>
               {a.name}
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}

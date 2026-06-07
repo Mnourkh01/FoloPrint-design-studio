@@ -1,5 +1,16 @@
+import { ARC_SWEEP_MAX, ARC_SWEEP_MIN } from './arc';
 import { isFontFamilyKey } from './fonts';
-import type { StoredDesignObject, TextAlign, TextDirection, TextWrapMode } from './types';
+import { PATTERN_TYPES } from './types';
+import type {
+  ImagePattern,
+  PatternType,
+  StoredDesignObject,
+  TextAlign,
+  TextDirection,
+  TextOutline,
+  TextShadow,
+  TextWrapMode,
+} from './types';
 
 /**
  * Content rules for design objects (non-geometry). Pure functions: the editor
@@ -18,6 +29,17 @@ export const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 export const TEXT_ALIGNMENTS: readonly TextAlign[] = ['left', 'center', 'right'];
 export const TEXT_DIRECTIONS: readonly TextDirection[] = ['ltr', 'rtl', 'auto'];
 export const TEXT_WRAP_MODES: readonly TextWrapMode[] = ['none', 'box'];
+/** Outline stroke width bounds, canvas px (v1.8). */
+export const OUTLINE_WIDTH_MIN = 1;
+export const OUTLINE_WIDTH_MAX = 20;
+/** Max absolute shadow offset per axis, canvas px (v1.8). */
+export const SHADOW_OFFSET_MAX = 25;
+/** Letter spacing bounds, canvas px between glyphs (v1.8). */
+export const LETTER_SPACING_MIN = -20;
+export const LETTER_SPACING_MAX = 100;
+/** Pattern tile gap bounds, canvas px (v1.9). */
+export const PATTERN_SPACING_MIN = 0;
+export const PATTERN_SPACING_MAX = 100;
 
 /**
  * Control characters are rejected except `\n` (explicit line breaks).
@@ -91,6 +113,7 @@ function imageObjectContentErrors(
   if (typeof obj.assetId !== 'string' || obj.assetId.length === 0) {
     errors.push('Image object must reference an asset');
   }
+  errors.push(...patternErrors((obj as { pattern?: ImagePattern }).pattern, obj.rotation));
   // Compare against undefined, not `in`: class instances (DTOs) may carry every
   // declared field as an own undefined property (useDefineForClassFields).
   const carried = obj as Record<string, unknown>;
@@ -100,9 +123,38 @@ function imageObjectContentErrors(
     carried.fontSize !== undefined ||
     carried.direction !== undefined ||
     carried.wrapMode !== undefined ||
-    carried.wrappedLines !== undefined
+    carried.wrappedLines !== undefined ||
+    carried.outline !== undefined ||
+    carried.shadow !== undefined ||
+    carried.letterSpacing !== undefined ||
+    carried.arc !== undefined
   ) {
     errors.push('Image object must not carry text fields');
+  }
+  return errors;
+}
+
+/** v1.9 pattern rules: known type, bounded spacing, axis-aligned tile only. */
+function patternErrors(pattern: ImagePattern | undefined, rotation: unknown): string[] {
+  if (pattern === undefined) return [];
+  if (typeof pattern !== 'object' || pattern === null) {
+    return ['Pattern must be an object with type and spacing'];
+  }
+  const errors: string[] = [];
+  if (!PATTERN_TYPES.includes(pattern.type as PatternType)) {
+    errors.push(`Pattern type must be one of ${PATTERN_TYPES.join(', ')}`);
+  }
+  if (
+    !isFiniteNumber(pattern.spacing) ||
+    pattern.spacing < PATTERN_SPACING_MIN ||
+    pattern.spacing > PATTERN_SPACING_MAX
+  ) {
+    errors.push(
+      `Pattern spacing must be between ${PATTERN_SPACING_MIN} and ${PATTERN_SPACING_MAX}`,
+    );
+  }
+  if (isFiniteNumber(rotation) && rotation % 360 !== 0) {
+    errors.push('Patterned images must not be rotated');
   }
   return errors;
 }
@@ -112,6 +164,10 @@ function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text'
 
   if ((obj as unknown as Record<string, unknown>).assetId !== undefined) {
     errors.push('Text object must not carry an assetId');
+  }
+
+  if ((obj as unknown as Record<string, unknown>).pattern !== undefined) {
+    errors.push('Text object must not carry a pattern');
   }
 
   const wrapMode: TextWrapMode = obj.wrapMode ?? 'none';
@@ -161,7 +217,83 @@ function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text'
   }
 
   errors.push(...wrappedLinesErrors(obj, wrapMode));
+  errors.push(...outlineErrors(obj.outline));
+  errors.push(...shadowErrors(obj.shadow));
 
+  if (
+    obj.letterSpacing !== undefined &&
+    (!isFiniteNumber(obj.letterSpacing) ||
+      obj.letterSpacing < LETTER_SPACING_MIN ||
+      obj.letterSpacing > LETTER_SPACING_MAX)
+  ) {
+    errors.push(`Letter spacing must be between ${LETTER_SPACING_MIN} and ${LETTER_SPACING_MAX}`);
+  }
+
+  if (obj.arc !== undefined) {
+    if (
+      !isFiniteNumber(obj.arc) ||
+      obj.arc === 0 ||
+      obj.arc < ARC_SWEEP_MIN ||
+      obj.arc > ARC_SWEEP_MAX
+    ) {
+      errors.push(
+        `Arc must be a non-zero sweep between ${ARC_SWEEP_MIN} and ${ARC_SWEEP_MAX} degrees`,
+      );
+    }
+    if (wrapMode === 'box') {
+      errors.push('Arc cannot be combined with wrap-in-box');
+    }
+    if (typeof obj.text === 'string' && obj.text.includes('\n')) {
+      errors.push('Arc text must be a single line');
+    }
+    if (typeof obj.text === 'string' && STRONG_RTL.test(obj.text)) {
+      errors.push('Arc is not supported for right-to-left text');
+    }
+    if (obj.outline !== undefined || obj.shadow !== undefined) {
+      errors.push('Arc cannot be combined with outline or shadow');
+    }
+  }
+
+  return errors;
+}
+
+/** v1.8 outline rules: well-formed object, hex color, bounded width. */
+function outlineErrors(outline: TextOutline | undefined): string[] {
+  if (outline === undefined) return [];
+  if (typeof outline !== 'object' || outline === null) {
+    return ['Outline must be an object with color and width'];
+  }
+  const errors: string[] = [];
+  if (typeof outline.color !== 'string' || !HEX_COLOR_PATTERN.test(outline.color)) {
+    errors.push('Outline color must be a #RRGGBB hex value');
+  }
+  if (
+    !isFiniteNumber(outline.width) ||
+    outline.width < OUTLINE_WIDTH_MIN ||
+    outline.width > OUTLINE_WIDTH_MAX
+  ) {
+    errors.push(`Outline width must be between ${OUTLINE_WIDTH_MIN} and ${OUTLINE_WIDTH_MAX}`);
+  }
+  return errors;
+}
+
+/** v1.8 shadow rules: hex color, bounded offsets, not invisibly zero. */
+function shadowErrors(shadow: TextShadow | undefined): string[] {
+  if (shadow === undefined) return [];
+  if (typeof shadow !== 'object' || shadow === null) {
+    return ['Shadow must be an object with color, offsetX, and offsetY'];
+  }
+  const errors: string[] = [];
+  if (typeof shadow.color !== 'string' || !HEX_COLOR_PATTERN.test(shadow.color)) {
+    errors.push('Shadow color must be a #RRGGBB hex value');
+  }
+  const validOffset = (v: unknown): v is number =>
+    isFiniteNumber(v) && Math.abs(v) <= SHADOW_OFFSET_MAX;
+  if (!validOffset(shadow.offsetX) || !validOffset(shadow.offsetY)) {
+    errors.push(`Shadow offsets must be between -${SHADOW_OFFSET_MAX} and ${SHADOW_OFFSET_MAX}`);
+  } else if (shadow.offsetX === 0 && shadow.offsetY === 0) {
+    errors.push('Shadow offset must not be zero in both axes');
+  }
   return errors;
 }
 

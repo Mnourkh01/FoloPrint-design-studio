@@ -39,6 +39,17 @@ export class TemplatesController {
     return new StreamableFile(this.storage.readStream(template.overlayImagePath));
   }
 
+  @Get(':slug/thumb')
+  @Header('Content-Type', 'image/png')
+  @Header('Cache-Control', 'public, max-age=300')
+  async thumbImage(@Param('slug') slug: string): Promise<StreamableFile> {
+    const template = await this.templates.findEntityBySlug(slug);
+    if (!template.thumbImagePath) {
+      throw new NotFoundException(`Template "${slug}" has no thumb image`);
+    }
+    return new StreamableFile(this.storage.readStream(template.thumbImagePath));
+  }
+
   @Get(':slug/areas/:key/image')
   @Header('Content-Type', 'image/png')
   @Header('Cache-Control', 'public, max-age=300')
@@ -67,5 +78,20 @@ export class TemplatesController {
       throw new NotFoundException(`Print area "${key}" has no area-specific overlay`);
     }
     return new StreamableFile(this.storage.readStream(area.overlayImagePath));
+  }
+
+  @Get(':slug/areas/:key/thumb')
+  @Header('Content-Type', 'image/png')
+  @Header('Cache-Control', 'public, max-age=300')
+  async areaThumbImage(
+    @Param('slug') slug: string,
+    @Param('key') key: string,
+  ): Promise<StreamableFile> {
+    const template = await this.templates.findEntityBySlug(slug);
+    const area = template.printAreas.find((a) => a.key === key);
+    if (!area?.thumbImagePath) {
+      throw new NotFoundException(`Print area "${key}" has no area-specific thumb`);
+    }
+    return new StreamableFile(this.storage.readStream(area.thumbImagePath));
   }
 }

@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createReadStream, type ReadStream } from 'node:fs';
-import { access, mkdir, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 /**
@@ -53,6 +53,11 @@ export class StorageService implements OnModuleInit {
 
   readStream(relativeKey: string): ReadStream {
     return createReadStream(this.resolvePath(relativeKey));
+  }
+
+  /** Whole-file read for in-process image work (asset transforms). */
+  read(relativeKey: string): Promise<Buffer> {
+    return readFile(this.resolvePath(relativeKey));
   }
 
   /** Delete a stored file; a missing file is not an error (idempotent cleanup). */

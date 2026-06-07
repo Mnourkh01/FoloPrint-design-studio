@@ -251,6 +251,182 @@ describe('renderMockup with text objects', () => {
   });
 });
 
+describe('renderMockup text outline and shadow (v1.8)', () => {
+  /** Counts pixels in a region matching a channel predicate. */
+  async function countPixels(
+    png: Buffer,
+    region: { left: number; top: number; width: number; height: number },
+    match: (r: number, g: number, b: number) => boolean,
+  ): Promise<number> {
+    const { data, info } = await sharp(png).extract(region).raw().toBuffer({ resolveWithObject: true });
+    let count = 0;
+    for (let i = 0; i < data.length; i += info.channels) {
+      if (match(data[i]!, data[i + 1]!, data[i + 2]!)) count++;
+    }
+    return count;
+  }
+
+  it('draws a green outline ring around red glyphs inside the stored box', async () => {
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ outline: { color: '#00cc00', width: 6 } })],
+    });
+
+    const box = { left: 120, top: 170, width: 160, height: 60 };
+    const red = await countPixels(buffer, box, (r, g) => r > 150 && g < 100);
+    const green = await countPixels(buffer, box, (r, g, b) => g > 120 && r < 100 && b < 100);
+    expect(red).toBeGreaterThan(30); // fill survives
+    expect(green).toBeGreaterThan(30); // ring exists around it
+
+    // Outline stays inside the stroke-inclusive stored box.
+    const above = await countPixels(buffer, { left: 110, top: 155, width: 180, height: 10 }, (r, g) => g > 120 && r < 100);
+    expect(above).toBe(0);
+  });
+
+  it('draws a hard blue shadow at the stored offset under the glyphs', async () => {
+    const plain = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject()],
+    });
+    const shadowed = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ shadow: { color: '#0000cc', offsetX: 8, offsetY: 8 } })],
+    });
+
+    const wide = { left: 110, top: 160, width: 190, height: 90 };
+    const isBlue = (r: number, g: number, b: number) => b > 120 && r < 100 && g < 100;
+    expect(await countPixels(plain, wide, isBlue)).toBe(0);
+    expect(await countPixels(shadowed, wide, isBlue)).toBeGreaterThan(30);
+
+    // The fill stays red on top of the shadow.
+    const red = await countPixels(shadowed, wide, (r, g) => r > 150 && g < 100);
+    expect(red).toBeGreaterThan(30);
+  });
+
+  it('letter spacing changes the glyph layout inside the fitted box', async () => {
+    // Render-then-fit normalizes the run to the same box, so spacing shows up as
+    // inter-glyph gaps: the same box holds visibly FEWER glyph pixels, and the
+    // output differs byte-wise from the unspaced render.
+    const render = (letterSpacing?: number) =>
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [textObject({ lines: ['Hi'], ...(letterSpacing ? { letterSpacing } : {}) })],
+      });
+
+    const plain = await render();
+    const spaced = await render(40);
+    expect(plain.equals(spaced)).toBe(false);
+
+    const box = { left: 120, top: 170, width: 160, height: 60 };
+    const plainCount = await countRedPixels(plain, box);
+    const spacedCount = await countRedPixels(spaced, box);
+    expect(spacedCount).toBeLessThan(plainCount * 0.85); // gaps replaced glyph area
+    expect(spacedCount).toBeGreaterThan(50); // glyphs still render
+  });
+
+  it('escapes markup characters instead of parsing them (vips parses Pango markup)', async () => {
+    // A raw '<' used to abort the render as malformed markup; '<b>' must render
+    // literally, never as a bold tag.
+    const buffer = await renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ lines: ['a < b & <b>c</b>'], letterSpacing: 10 })],
+    });
+    const inside = await countRedPixels(buffer, { left: 120, top: 170, width: 160, height: 60 });
+    expect(inside).toBeGreaterThan(50);
+  });
+
+  it('rejects invalid outline and shadow values', async () => {
+    const base = {
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+    };
+    await expect(
+      renderMockup({ ...base, objects: [textObject({ outline: { color: 'green', width: 6 } })] }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({ ...base, objects: [textObject({ outline: { color: '#00cc00', width: 99 } })] }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({
+        ...base,
+        objects: [textObject({ shadow: { color: '#0000cc', offsetX: 99, offsetY: 0 } })],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({ ...base, objects: [textObject({ letterSpacing: 999 })] }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});
+
+describe('renderMockup arc text (v1.8)', () => {
+  const render = (overrides: Partial<RenderTextObject>) =>
+    renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ lines: ['CURVED'], height: 100, ...overrides })],
+    });
+
+  it('renders arced glyphs inside the stored box and differs from straight text', async () => {
+    const straight = await render({});
+    const arced = await render({ arc: 120 });
+
+    expect(arced.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(arced.equals(straight)).toBe(false);
+
+    // Glyph ink present inside the box (120..280 x 150..250)...
+    const inside = await countRedPixels(arced, { left: 120, top: 150, width: 160, height: 100 });
+    expect(inside).toBeGreaterThan(50);
+    // ...and clipped to it.
+    const above = await countRedPixels(arced, { left: 110, top: 135, width: 180, height: 10 });
+    const below = await countRedPixels(arced, { left: 110, top: 255, width: 180, height: 10 });
+    expect(above + below).toBe(0);
+  });
+
+  it('positive and negative sweeps bow in opposite directions', async () => {
+    const up = await render({ arc: 140 });
+    const down = await render({ arc: -140 });
+    expect(up.equals(down)).toBe(false);
+
+    // Upward bow: the middle of the run sits high in the box, so the top-center
+    // band carries more ink than it does for the downward bow.
+    const band = { left: 170, top: 152, width: 60, height: 25 };
+    const upInk = await countRedPixels(up, band);
+    const downInk = await countRedPixels(down, band);
+    expect(upInk).toBeGreaterThan(downInk);
+  });
+
+  it('rejects invalid arcs and unsupported combinations', async () => {
+    await expect(render({ arc: 0 })).rejects.toThrow(RenderValidationError);
+    await expect(render({ arc: 999 })).rejects.toThrow(RenderValidationError);
+    await expect(render({ arc: 90, lines: ['two', 'lines'] })).rejects.toThrow(
+      RenderValidationError,
+    );
+    await expect(render({ arc: 90, direction: 'rtl' })).rejects.toThrow(RenderValidationError);
+    await expect(
+      render({ arc: 90, outline: { color: '#00cc00', width: 4 } }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});
+
 describe('renderMockup RTL/Arabic (v1.6)', () => {
   it('shapes Arabic: joined word materially narrower than isolated letters (spike S1)', async () => {
     const joined = await arabicRasterWidth('مرحبا بالعالم');

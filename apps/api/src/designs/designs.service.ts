@@ -29,7 +29,7 @@ import {
   type RenderResultDto,
   type StoredDesignPlacement,
 } from '@foloprint/shared';
-import { renderMockup, type RenderObject } from '@foloprint/renderer';
+import { renderMockup, type OverlayBlend, type RenderObject } from '@foloprint/renderer';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import type { CreateDesignDto, DesignObjectDto } from './dto/create-design.dto';
@@ -209,10 +209,26 @@ export class DesignsService {
         ...(o.direction !== undefined ? { direction: o.direction } : {}),
         ...(o.wrapMode !== undefined ? { wrapMode: o.wrapMode } : {}),
         ...(o.wrappedLines !== undefined ? { wrappedLines: o.wrappedLines } : {}),
+        // v1.8 effects: explicit field picking, same as everything else here.
+        ...(o.outline !== undefined
+          ? { outline: { color: o.outline.color, width: o.outline.width } }
+          : {}),
+        ...(o.shadow !== undefined
+          ? { shadow: { color: o.shadow.color, offsetX: o.shadow.offsetX, offsetY: o.shadow.offsetY } }
+          : {}),
+        ...(o.letterSpacing !== undefined ? { letterSpacing: o.letterSpacing } : {}),
+        ...(o.arc !== undefined ? { arc: o.arc } : {}),
         ...base,
       };
     }
-    return { type: 'image', assetId: o.assetId!, ...base };
+    return {
+      type: 'image',
+      assetId: o.assetId!,
+      ...(o.pattern !== undefined
+        ? { pattern: { type: o.pattern.type, spacing: o.pattern.spacing } }
+        : {}),
+      ...base,
+    };
   }
 
   /** Asset ids referenced by image objects; text objects reference no assets. */
@@ -274,6 +290,10 @@ export class DesignsService {
             color: obj.color,
             align: obj.align,
             direction: resolveTextDirection(obj.text, obj.direction),
+            ...(obj.outline ? { outline: obj.outline } : {}),
+            ...(obj.shadow ? { shadow: obj.shadow } : {}),
+            ...(obj.letterSpacing ? { letterSpacing: obj.letterSpacing } : {}),
+            ...(obj.arc ? { arc: obj.arc } : {}),
             ...base,
           };
         }
@@ -286,19 +306,26 @@ export class DesignsService {
         return {
           type: 'image',
           imagePath: this.storage.resolvePath(asset.storagePath),
+          ...(obj.pattern ? { pattern: obj.pattern } : {}),
           ...base,
         };
       });
 
-      // Area-specific view images with template-level fallback.
+      // Area-specific view images with template-level fallback; the mask and the
+      // overlay blend follow the same rule. The renderer validates the blend value,
+      // so a bad seed/config fails loudly instead of rendering wrong.
       const baseImagePath = area.baseImagePath ?? template.baseImagePath;
       const overlayImagePath = area.overlayImagePath ?? template.overlayImagePath;
+      const maskImagePath = area.maskImagePath ?? template.maskImagePath;
+      const overlayBlend = (area.overlayBlend ?? template.overlayBlend) as OverlayBlend;
 
       let png: Buffer;
       try {
         png = await renderMockup({
           baseImagePath: this.storage.resolvePath(baseImagePath),
           overlayImagePath: overlayImagePath ? this.storage.resolvePath(overlayImagePath) : null,
+          overlayBlend,
+          maskImagePath: maskImagePath ? this.storage.resolvePath(maskImagePath) : null,
           canvasWidth: template.canvasWidth,
           canvasHeight: template.canvasHeight,
           printArea: area,

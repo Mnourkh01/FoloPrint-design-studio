@@ -342,11 +342,21 @@ button {
   height: 34px;
   border-radius: 8px;
   color: var(--ink-soft);
-  cursor: not-allowed;
-  opacity: 0.4;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.studio__history button:hover:not(:disabled) {
+  background: var(--paper-deep);
+  color: var(--ink);
+}
+
+.studio__history button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .studio__mode-tabs {
@@ -772,6 +782,11 @@ button {
   color: var(--accent);
 }
 
+.studio__context-tool:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
 /* Floating tool panel anchored under the contextual toolbar. */
 .studio__object-panel {
   position: absolute;
@@ -1080,6 +1095,35 @@ button {
 .text-panel__wrap small {
   font-weight: 400;
   color: var(--ink-soft);
+}
+
+/* v1.8 effect rows (outline, shadow): toggle line + compact controls under it. */
+.text-panel__effect-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.text-panel__effect-row input[type='color'] {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  cursor: pointer;
+}
+
+.text-panel__effect-row input[type='number'] {
+  width: 58px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Non-dismissable while true: mirrors the server's 8-line rule before the round-trip. */

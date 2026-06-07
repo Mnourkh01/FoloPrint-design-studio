@@ -62,6 +62,29 @@ export async function uploadAsset(file: File): Promise<UploadedAssetDto> {
   return handle(await fetch(apiUrl('/assets/upload'), { method: 'POST', body: form }));
 }
 
+/** Derives a new asset with the flat background removed; the source asset stays intact. */
+export async function removeAssetBackground(assetId: string): Promise<UploadedAssetDto> {
+  return handle(
+    await fetch(apiUrl(`/assets/${encodeURIComponent(assetId)}/remove-background`), {
+      method: 'POST',
+    }),
+  );
+}
+
+/** Derives a new asset cropped to the given source-pixel rect; the source stays intact. */
+export async function cropAsset(
+  assetId: string,
+  rect: { left: number; top: number; width: number; height: number },
+): Promise<UploadedAssetDto> {
+  return handle(
+    await fetch(apiUrl(`/assets/${encodeURIComponent(assetId)}/crop`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rect),
+    }),
+  );
+}
+
 export interface SaveDesignPayload {
   templateId: string;
   placements: DesignDocument['placements'];

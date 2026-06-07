@@ -17,19 +17,68 @@ import {
   ValidateNested,
 } from 'class-validator';
 import {
+  ARC_SWEEP_MAX,
+  ARC_SWEEP_MIN,
   FONT_KEYS,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   HEX_COLOR_PATTERN,
+  LETTER_SPACING_MAX,
+  LETTER_SPACING_MIN,
+  OUTLINE_WIDTH_MAX,
+  OUTLINE_WIDTH_MIN,
+  PATTERN_SPACING_MAX,
+  PATTERN_SPACING_MIN,
+  PATTERN_TYPES,
+  SHADOW_OFFSET_MAX,
   TEXT_ALIGNMENTS,
   TEXT_DIRECTIONS,
   TEXT_MAX_LENGTH,
   TEXT_MAX_LINES,
   TEXT_WRAP_MODES,
+  type PatternType,
   type TextAlign,
   type TextDirection,
   type TextWrapMode,
 } from '@foloprint/shared';
+
+/** v1.9 pattern tiling. Rotation-0 rule is enforced by the shared validation. */
+export class ImagePatternDto {
+  @IsIn(PATTERN_TYPES as readonly string[])
+  type!: PatternType;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(PATTERN_SPACING_MIN)
+  @Max(PATTERN_SPACING_MAX)
+  spacing!: number;
+}
+
+/** v1.8 glyph outline. Both fields required when the object is present. */
+export class TextOutlineDto {
+  @Matches(HEX_COLOR_PATTERN, { message: 'outline color must be a #RRGGBB hex value' })
+  color!: string;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(OUTLINE_WIDTH_MIN)
+  @Max(OUTLINE_WIDTH_MAX)
+  width!: number;
+}
+
+/** v1.8 hard drop shadow. All fields required when the object is present. */
+export class TextShadowDto {
+  @Matches(HEX_COLOR_PATTERN, { message: 'shadow color must be a #RRGGBB hex value' })
+  color!: string;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-SHADOW_OFFSET_MAX)
+  @Max(SHADOW_OFFSET_MAX)
+  offsetX!: number;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-SHADOW_OFFSET_MAX)
+  @Max(SHADOW_OFFSET_MAX)
+  offsetY!: number;
+}
 
 const isText = (o: DesignObjectDto): boolean => o.type === 'text';
 
@@ -54,6 +103,13 @@ export class DesignObjectDto {
   @ValidateIf((o: DesignObjectDto) => !isText(o))
   @IsUUID()
   assetId?: string;
+
+  /** Tiling fill (v1.9); missing means the single image. Image objects only. */
+  @ValidateIf((o: DesignObjectDto) => !isText(o))
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ImagePatternDto)
+  pattern?: ImagePatternDto;
 
   /** Object center X, template canvas px. */
   @IsNumber({ allowNaN: false, allowInfinity: false })
@@ -128,6 +184,40 @@ export class DesignObjectDto {
   @IsString({ each: true })
   @Length(1, TEXT_MAX_LENGTH, { each: true })
   wrappedLines?: string[];
+
+  /** Glyph outline (v1.8); missing means none. Text objects only. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TextOutlineDto)
+  outline?: TextOutlineDto;
+
+  /** Hard drop shadow (v1.8); missing means none. Text objects only. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TextShadowDto)
+  shadow?: TextShadowDto;
+
+  /** Extra space between glyphs, canvas px (v1.8); missing means font default. */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(LETTER_SPACING_MIN)
+  @Max(LETTER_SPACING_MAX)
+  letterSpacing?: number;
+
+  /**
+   * Arc sweep, degrees (v1.8); missing means straight. The non-zero rule and the
+   * forbidden combinations (wrap, multi-line, RTL, outline, shadow) are enforced
+   * by the shared validation the service runs as the authority.
+   */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(ARC_SWEEP_MIN)
+  @Max(ARC_SWEEP_MAX)
+  arc?: number;
 }
 
 /** All artwork for one print area. Placements with zero objects are rejected. */

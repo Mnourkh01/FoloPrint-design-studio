@@ -32,14 +32,52 @@ export interface DesignObjectBase {
   rotation: number;
 }
 
+/** How a patterned image tiles across its print area (v1.9). */
+export const PATTERN_TYPES = ['grid', 'mirror', 'half-drop'] as const;
+export type PatternType = (typeof PATTERN_TYPES)[number];
+
+/**
+ * Pattern fill (v1.9): the object's box becomes the BASE TILE and copies fill the
+ * whole print area (clipped to it). 'grid' repeats as-is, 'mirror' alternates
+ * flips on both axes, 'half-drop' shifts odd columns by half a tile. Patterned
+ * objects must have rotation 0 (the tiling math is axis-aligned).
+ */
+export interface ImagePattern {
+  type: PatternType;
+  /** Gap between tiles in canvas px (0..100). */
+  spacing: number;
+}
+
 /** One placed artwork image inside a print area. */
 export interface ImageDesignObject extends DesignObjectBase {
   type: 'image';
   /** UploadedAsset id this object renders. */
   assetId: string;
+  /** Tiling fill (v1.9); absent = the single image. */
+  pattern?: ImagePattern;
 }
 
 export type TextAlign = 'left' | 'center' | 'right';
+
+/** Outline (stroke) around text glyphs; the editor paints it stroke-first (half outward). */
+export interface TextOutline {
+  /** Strict #RRGGBB. */
+  color: string;
+  /** Stroke width in canvas px (1..20); the measured text box includes it. */
+  width: number;
+}
+
+/**
+ * Hard drop shadow behind text glyphs (no blur). Offsets in canvas px, each
+ * clamped to +-25. Shadow pixels may extend past the stored text box by design;
+ * geometry validation stays on the glyph box.
+ */
+export interface TextShadow {
+  /** Strict #RRGGBB. */
+  color: string;
+  offsetX: number;
+  offsetY: number;
+}
 
 /** Base text direction. 'auto' = first strong character decides (resolveTextDirection). */
 export type TextDirection = 'ltr' | 'rtl' | 'auto';
@@ -80,6 +118,23 @@ export interface TextDesignObject extends DesignObjectBase {
    * edited, only regenerated on save.
    */
   wrappedLines?: string[];
+  /** Glyph outline (v1.8); absent = none. */
+  outline?: TextOutline;
+  /** Hard drop shadow (v1.8); absent = none. */
+  shadow?: TextShadow;
+  /**
+   * Extra space between glyphs in canvas px (v1.8); absent or 0 = font default.
+   * Negative values tighten. The editor maps it to Fabric's em-based charSpacing,
+   * the renderer to Pango letter_spacing.
+   */
+  letterSpacing?: number;
+  /**
+   * Arc bend (v1.8): the sweep angle in degrees the text covers on a circle.
+   * Positive bows upward, negative downward; absent = straight. Single visual
+   * line, LTR content only, and not combinable with wrap, outline, or shadow
+   * (per-glyph layout; see layoutArcGlyphs).
+   */
+  arc?: number;
 }
 
 /**
@@ -136,6 +191,15 @@ export type AnyDesignDocument = DesignDocumentV1 | StoredDesignDocumentV2;
 // API response shapes (what the web app consumes; never contains fs paths)
 // ---------------------------------------------------------------------------
 
+/**
+ * How a template's overlay composites over the artwork. 'over' is plain alpha
+ * (legacy SVG templates), 'multiply' darkens (photographic shadows and folds),
+ * 'soft-light' is a gentler sheen. The renderer and the editor both honor it so
+ * the live canvas matches the server mockup.
+ */
+export const OVERLAY_BLENDS = ['over', 'multiply', 'soft-light'] as const;
+export type OverlayBlend = (typeof OVERLAY_BLENDS)[number];
+
 export interface PrintAreaDto {
   id: string;
   key: string;
@@ -151,6 +215,10 @@ export interface PrintAreaDto {
   imageUrl: string | null;
   /** Same fallback rule for the area's overlay image. */
   overlayUrl: string | null;
+  /** Same fallback rule for the area's card/tab thumb. */
+  thumbUrl: string | null;
+  /** Area-specific overlay blend; null falls back to the template's overlayBlend. */
+  overlayBlend: OverlayBlend | null;
   /**
    * Physical printable width in inches; null means "not configured" and clients
    * apply the shared fallback (assumed 12in width, aspect-derived height).
@@ -169,6 +237,10 @@ export interface ProductTemplateDto {
   imageUrl: string;
   /** Relative API URL streaming the overlay image, if the template has one. */
   overlayUrl: string | null;
+  /** Relative API URL streaming a small card/tab thumb; null = use the full image. */
+  thumbUrl: string | null;
+  /** How overlays composite over the artwork ('over' unless the template says otherwise). */
+  overlayBlend: OverlayBlend;
   printAreas: PrintAreaDto[];
 }
 

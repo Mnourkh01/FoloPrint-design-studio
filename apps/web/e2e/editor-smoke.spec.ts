@@ -5,8 +5,8 @@ const FIXTURE = join(__dirname, 'fixtures', 'logo.png');
 
 // Matches the seeded "classic-tee" print areas (apps/api/prisma/seed.ts).
 const PRINT_AREAS = {
-  front: { x: 370, y: 300, width: 260, height: 340 },
-  back: { x: 370, y: 260, width: 260, height: 380 },
+  front: { x: 427, y: 400, width: 400, height: 520 },
+  back: { x: 427, y: 360, width: 400, height: 560 },
 } as const;
 
 type AreaKey = keyof typeof PRINT_AREAS;
@@ -192,8 +192,8 @@ test('multi-area flow: front + back artwork, switch preserves state, both previe
   expect(backState.visible).toBe(true);
   expectInsidePrintArea(backState, 'back');
 
-  // Move the back object near the TOP of the back area: inside back (y >= 260) but
-  // OUTSIDE the front area (y < 300). If hidden objects were validated against the
+  // Move the back object near the TOP of the back area: inside back (y >= 360) but
+  // OUTSIDE the front area (y < 400). If hidden objects were validated against the
   // active area, the save below would fail; per-area validation must accept it.
   const targetBoxTop = PRINT_AREAS.back.y + 5;
   const dyCanvas = targetBoxTop - backState.box.top;

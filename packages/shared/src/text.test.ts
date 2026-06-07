@@ -4,7 +4,10 @@ import {
   designObjectContentErrors,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
+  OUTLINE_WIDTH_MAX,
+  OUTLINE_WIDTH_MIN,
   resolveTextDirection,
+  SHADOW_OFFSET_MAX,
   TEXT_MAX_LENGTH,
   TEXT_MAX_LINES,
 } from './text';
@@ -266,6 +269,152 @@ describe('designObjectContentErrors for image objects', () => {
     const missing = { type: 'image', x: 0, y: 0, width: 10, height: 10, rotation: 0 };
     expect(designObjectContentErrors(missing as unknown as StoredDesignObject)).toContainEqual(
       expect.stringMatching(/reference an asset/),
+    );
+  });
+
+  it('accepts a valid pattern and rejects bad types, spacing, and rotation', () => {
+    const patterned = (pattern: unknown, rotation = 0): StoredDesignObject =>
+      ({
+        type: 'image',
+        assetId: 'a',
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 10,
+        rotation,
+        pattern,
+      }) as unknown as StoredDesignObject;
+
+    expect(designObjectContentErrors(patterned({ type: 'grid', spacing: 0 }))).toEqual([]);
+    expect(designObjectContentErrors(patterned({ type: 'mirror', spacing: 100 }))).toEqual([]);
+    expect(designObjectContentErrors(patterned({ type: 'half-drop', spacing: 12 }))).toEqual([]);
+
+    expect(designObjectContentErrors(patterned({ type: 'spiral', spacing: 0 }))).toContainEqual(
+      expect.stringMatching(/Pattern type/),
+    );
+    expect(designObjectContentErrors(patterned({ type: 'grid', spacing: 101 }))).toContainEqual(
+      expect.stringMatching(/Pattern spacing/),
+    );
+    expect(designObjectContentErrors(patterned({ type: 'grid', spacing: 0 }, 15))).toContainEqual(
+      expect.stringMatching(/must not be rotated/),
+    );
+    expect(designObjectContentErrors(patterned('tiled'))).toContainEqual(
+      expect.stringMatching(/Pattern must be an object/),
+    );
+  });
+
+  it('rejects a pattern on a text object', () => {
+    expect(errorsOf({ pattern: { type: 'grid', spacing: 0 } } as never)).toContainEqual(
+      expect.stringMatching(/must not carry a pattern/),
+    );
+  });
+
+  it('rejects an image object carrying v1.8 text effect fields', () => {
+    const sneaky = {
+      type: 'image',
+      assetId: 'a',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      outline: { color: '#000000', width: 2 },
+    };
+    expect(designObjectContentErrors(sneaky as unknown as StoredDesignObject)).toContainEqual(
+      expect.stringMatching(/must not carry text fields/),
+    );
+  });
+});
+
+describe('designObjectContentErrors for text outline and shadow (v1.8)', () => {
+  it('accepts a valid outline and shadow, alone and together', () => {
+    expect(errorsOf({ outline: { color: '#ffffff', width: 2 } })).toEqual([]);
+    expect(errorsOf({ shadow: { color: '#000000', offsetX: 4, offsetY: 4 } })).toEqual([]);
+    expect(
+      errorsOf({
+        outline: { color: '#ffffff', width: OUTLINE_WIDTH_MAX },
+        shadow: { color: '#000000', offsetX: -SHADOW_OFFSET_MAX, offsetY: SHADOW_OFFSET_MAX },
+      }),
+    ).toEqual([]);
+    expect(errorsOf({ outline: { color: '#ffffff', width: OUTLINE_WIDTH_MIN } })).toEqual([]);
+  });
+
+  it('rejects bad outline colors and widths', () => {
+    expect(errorsOf({ outline: { color: 'white', width: 2 } })).toContainEqual(
+      expect.stringMatching(/Outline color/),
+    );
+    expect(errorsOf({ outline: { color: '#ffffff', width: 0 } })).toContainEqual(
+      expect.stringMatching(/Outline width/),
+    );
+    expect(errorsOf({ outline: { color: '#ffffff', width: OUTLINE_WIDTH_MAX + 1 } })).toContainEqual(
+      expect.stringMatching(/Outline width/),
+    );
+    expect(
+      errorsOf({ outline: { color: '#ffffff', width: Number.NaN } }),
+    ).toContainEqual(expect.stringMatching(/Outline width/));
+  });
+
+  it('rejects bad shadow colors and offsets', () => {
+    expect(errorsOf({ shadow: { color: 'rgb(0,0,0)', offsetX: 4, offsetY: 4 } })).toContainEqual(
+      expect.stringMatching(/Shadow color/),
+    );
+    expect(
+      errorsOf({ shadow: { color: '#000000', offsetX: SHADOW_OFFSET_MAX + 1, offsetY: 0 } }),
+    ).toContainEqual(expect.stringMatching(/Shadow offsets/));
+    expect(
+      errorsOf({ shadow: { color: '#000000', offsetX: Number.POSITIVE_INFINITY, offsetY: 0 } }),
+    ).toContainEqual(expect.stringMatching(/Shadow offsets/));
+    expect(errorsOf({ shadow: { color: '#000000', offsetX: 0, offsetY: 0 } })).toContainEqual(
+      expect.stringMatching(/not be zero/),
+    );
+  });
+
+  it('rejects malformed effect containers', () => {
+    expect(errorsOf({ outline: 'thick' as never })).toContainEqual(
+      expect.stringMatching(/Outline must be an object/),
+    );
+    expect(errorsOf({ shadow: 7 as never })).toContainEqual(
+      expect.stringMatching(/Shadow must be an object/),
+    );
+  });
+
+  it('accepts a valid arc and rejects its forbidden combinations', () => {
+    expect(errorsOf({ arc: 90 })).toEqual([]);
+    expect(errorsOf({ arc: -180 })).toEqual([]);
+    expect(errorsOf({ arc: 12, letterSpacing: 10 })).toEqual([]); // spacing combines
+
+    expect(errorsOf({ arc: 0 })).toContainEqual(expect.stringMatching(/Arc must be/));
+    expect(errorsOf({ arc: 181 })).toContainEqual(expect.stringMatching(/Arc must be/));
+    expect(errorsOf({ arc: Number.NaN })).toContainEqual(expect.stringMatching(/Arc must be/));
+    expect(
+      errorsOf({ arc: 90, wrapMode: 'box', wrappedLines: ['Hello world'] }),
+    ).toContainEqual(expect.stringMatching(/wrap-in-box/));
+    expect(errorsOf({ arc: 90, text: 'two\nlines' })).toContainEqual(
+      expect.stringMatching(/single line/),
+    );
+    expect(errorsOf({ arc: 90, text: 'مرحبا' })).toContainEqual(
+      expect.stringMatching(/right-to-left/),
+    );
+    expect(errorsOf({ arc: 90, outline: { color: '#ffffff', width: 2 } })).toContainEqual(
+      expect.stringMatching(/outline or shadow/),
+    );
+    expect(
+      errorsOf({ arc: 90, shadow: { color: '#000000', offsetX: 4, offsetY: 4 } }),
+    ).toContainEqual(expect.stringMatching(/outline or shadow/));
+  });
+
+  it('accepts in-range letter spacing and rejects out-of-range values', () => {
+    expect(errorsOf({ letterSpacing: 0 })).toEqual([]);
+    expect(errorsOf({ letterSpacing: -20 })).toEqual([]);
+    expect(errorsOf({ letterSpacing: 100 })).toEqual([]);
+    expect(errorsOf({ letterSpacing: -21 })).toContainEqual(
+      expect.stringMatching(/Letter spacing/),
+    );
+    expect(errorsOf({ letterSpacing: 101 })).toContainEqual(
+      expect.stringMatching(/Letter spacing/),
+    );
+    expect(errorsOf({ letterSpacing: Number.NaN })).toContainEqual(
+      expect.stringMatching(/Letter spacing/),
     );
   });
 });

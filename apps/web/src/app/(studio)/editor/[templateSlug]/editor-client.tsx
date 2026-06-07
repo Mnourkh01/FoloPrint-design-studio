@@ -267,7 +267,13 @@ const PATTERN_CHOICES: { key: PatternType | null; label: string }[] = [
  * artwork inside (w x h) of the area and anchors its CENTER at (cx, cy).
  * "Left chest" is the wearer's left, which faces the viewer's right.
  */
-type PlacementPreset = 'full' | 'chest-center' | 'chest-left' | 'chest-right';
+type PlacementPreset =
+  | 'full'
+  | 'chest-center'
+  | 'chest-left'
+  | 'chest-right'
+  | 'back-center'
+  | 'locker-patch';
 
 const PLACEMENT_SPECS: Record<PlacementPreset, { w: number; h: number; cx: number; cy: number }> = {
   full: { w: 0.92, h: 0.92, cx: 0.5, cy: 0.5 },
@@ -276,14 +282,25 @@ const PLACEMENT_SPECS: Record<PlacementPreset, { w: number; h: number; cx: numbe
   'chest-center': { w: 0.38, h: 0.3, cx: 0.5, cy: 0.22 },
   'chest-left': { w: 0.22, h: 0.18, cx: 0.75, cy: 0.15 },
   'chest-right': { w: 0.22, h: 0.18, cx: 0.25, cy: 0.15 },
+  // Back spots: a big centered print and the small below-the-collar patch.
+  'back-center': { w: 0.5, h: 0.45, cx: 0.5, cy: 0.4 },
+  'locker-patch': { w: 0.22, h: 0.12, cx: 0.5, cy: 0.07 },
 };
 
-const PLACEMENT_PRESETS: { key: PlacementPreset; label: string }[] = [
-  { key: 'full', label: 'Full front' },
-  { key: 'chest-center', label: 'Center chest' },
-  { key: 'chest-left', label: 'Left chest' },
-  { key: 'chest-right', label: 'Right chest' },
-];
+/** Per-side preset menus; the side names the placement, the math is shared. */
+const PLACEMENT_PRESETS: Record<'front' | 'back', { key: PlacementPreset; label: string }[]> = {
+  front: [
+    { key: 'full', label: 'Full front' },
+    { key: 'chest-center', label: 'Center chest' },
+    { key: 'chest-left', label: 'Left chest' },
+    { key: 'chest-right', label: 'Right chest' },
+  ],
+  back: [
+    { key: 'full', label: 'Full back' },
+    { key: 'back-center', label: 'Center back' },
+    { key: 'locker-patch', label: 'Locker patch' },
+  ],
+};
 
 /**
  * Polished selection chrome shared by every design object: branded border,
@@ -1528,6 +1545,33 @@ export function EditorClient({
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
         event.preventDefault();
         undoRedoRef.current.redo();
+        return;
+      }
+
+      // Arrow-key nudge: 1 canvas px per tap, 10 with Shift. preventDefault
+      // keeps the page from scrolling while an object is selected.
+      const NUDGE: Record<string, [number, number]> = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      const step = NUDGE[event.key];
+      if (step) {
+        const active = canvas.getActiveObject() as DesignedObject | undefined;
+        if (!active?.kind) return;
+        event.preventDefault();
+        const factor = event.shiftKey ? 10 : 1;
+        active.set({
+          left: (active.left ?? 0) + step[0] * factor,
+          top: (active.top ?? 0) + step[1] * factor,
+        });
+        active.setCoords();
+        clampToPrintArea(active);
+        if (active.pattern) patternHooksRef.current.offset(active);
+        canvas.requestRenderAll();
+        readSelection(active);
+        markMutated();
         return;
       }
 
@@ -3669,27 +3713,28 @@ export function EditorClient({
                   </button>
                 ))}
               </div>
-              {/* One-click logo placements: front of the garment only (chest
-                  wording makes no sense on the back), single images only
+              {/* One-click logo placements, per side; single images only
                   (patterned tiles already fill the area). */}
-              {selection.kind === 'image' && !selection.pattern && activeArea?.key === 'front' && (
-                <>
-                  <p className="studio__object-panel-title">Placement</p>
-                  <div className="studio__preset-row" role="group" aria-label="Placement presets">
-                    {PLACEMENT_PRESETS.map((preset) => (
-                      <button
-                        key={preset.key}
-                        type="button"
-                        className="studio__preset-btn"
-                        data-testid={`placement-${preset.key}`}
-                        onClick={() => applyPlacementPreset(preset.key)}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
+              {selection.kind === 'image' &&
+                !selection.pattern &&
+                (activeArea?.key === 'front' || activeArea?.key === 'back') && (
+                  <>
+                    <p className="studio__object-panel-title">Placement</p>
+                    <div className="studio__preset-row" role="group" aria-label="Placement presets">
+                      {PLACEMENT_PRESETS[activeArea.key].map((preset) => (
+                        <button
+                          key={preset.key}
+                          type="button"
+                          className="studio__preset-btn"
+                          data-testid={`placement-${preset.key}`}
+                          onClick={() => applyPlacementPreset(preset.key)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
             </div>
           )}
 

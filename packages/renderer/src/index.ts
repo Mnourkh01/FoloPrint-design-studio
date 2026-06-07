@@ -645,6 +645,98 @@ async function loadCanvasSizedImage(path: string, width: number, height: number)
 }
 
 /**
+ * Fabric realism (v2.4). DARKEN is how hard broad folds/shadows multiply into
+ * the ink, FLOOR caps the deepest darkening (a crease never blacks the ink
+ * out), GAMMA shapes the falloff. LIFT screens local fold RIDGES back toward
+ * the fabric highlight so dark ink shows light streaks where the cloth catches
+ * light (multiply alone can only darken, which leaves black print looking
+ * pasted on a pale garment). RIDGE_GAIN maps the high-pass detail into that
+ * lift, capped by LIFT. Tuned so a flat print reads as "in the cloth" without
+ * looking dirty or washed.
+ */
+const LIGHTMAP_DARKEN = 0.6;
+const LIGHTMAP_FLOOR = 0.42;
+const LIGHTMAP_GAMMA = 1.15;
+const LIGHTMAP_LIFT = 0.4;
+const LIGHTMAP_RIDGE_GAIN = 3.5;
+const LIGHTMAP_BLUR_R = 10;
+
+/** Per-pixel ink shading: a multiply factor (folds darken) plus a screen factor
+ * (ridges lift toward white). Both 0..1; the caller does ink*mul then lifts the
+ * result toward 255 by lift. Derived from the base garment luminance normalized
+ * to its own highlight, so it works on any garment color. */
+interface InkLightMap {
+  mul: Float32Array;
+  lift: Float32Array;
+}
+
+function buildInkLightMap(
+  baseRaw: Buffer,
+  maskRaw: Buffer | null,
+  w: number,
+  h: number,
+): InkLightMap {
+  const n = w * h;
+  const luma = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    luma[i] = 0.2126 * baseRaw[i * 4]! + 0.7152 * baseRaw[i * 4 + 1]! + 0.0722 * baseRaw[i * 4 + 2]!;
+  }
+
+  // Highlight reference: 97th percentile luma over the garment (mask if present,
+  // else the whole image), the same definition the recolor/overlay use.
+  const samples: number[] = [];
+  for (let i = 0; i < n; i += 7) {
+    if (!maskRaw || maskRaw[i * 4 + 3]! > 200) samples.push(luma[i]!);
+  }
+  samples.sort((a, b) => a - b);
+  const whitePoint = Math.max(1, samples[Math.floor(samples.length * 0.97)] ?? 255);
+
+  // Low-frequency shading (broad folds) vs the high-pass (sharp ridges/weave).
+  const lf = boxBlurGray(luma, w, h, LIGHTMAP_BLUR_R);
+
+  const mul = new Float32Array(n);
+  const lift = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const vLow = Math.min(1, lf[i]! / whitePoint);
+    const shade = LIGHTMAP_FLOOR + (1 - LIGHTMAP_FLOOR) * Math.pow(vLow, LIGHTMAP_GAMMA);
+    const hp = (luma[i]! - lf[i]!) / whitePoint; // local ridge (+) / valley (-)
+    // Broad folds darken; local valleys add a touch more darkening.
+    mul[i] = (1 - LIGHTMAP_DARKEN * (1 - shade)) * (1 + Math.min(0, hp) * LIGHTMAP_RIDGE_GAIN * 0.5);
+    // Local ridges lift the ink toward the fabric highlight.
+    lift[i] = Math.max(0, Math.min(LIGHTMAP_LIFT, hp * LIGHTMAP_RIDGE_GAIN * LIGHTMAP_LIFT));
+  }
+  return { mul, lift };
+}
+
+/** Separable box blur over a single-channel float field; used for the grain high-pass. */
+function boxBlurGray(src: Float32Array, w: number, h: number, r: number): Float32Array {
+  const tmp = new Float32Array(w * h);
+  const win = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    for (let x = -r; x <= r; x++) sum += src[y * w + Math.max(0, Math.min(w - 1, x))]!;
+    for (let x = 0; x < w; x++) {
+      tmp[y * w + x] = sum / win;
+      const add = src[y * w + Math.min(w - 1, x + r + 1)]!;
+      const sub = src[y * w + Math.max(0, x - r)]!;
+      sum += add - sub;
+    }
+  }
+  const dst = new Float32Array(w * h);
+  for (let x = 0; x < w; x++) {
+    let sum = 0;
+    for (let y = -r; y <= r; y++) sum += tmp[Math.max(0, Math.min(h - 1, y)) * w + x]!;
+    for (let y = 0; y < h; y++) {
+      dst[y * w + x] = sum / win;
+      const add = tmp[Math.min(h - 1, y + r + 1) * w + x]!;
+      const sub = tmp[Math.max(0, y - r) * w + x]!;
+      sum += add - sub;
+    }
+  }
+  return dst;
+}
+
+/**
  * Compose a 2D product mockup PNG:
  * base image (resized to canvas) -> design objects (image or text, resized, rotated,
  * positioned, optionally clipped to the garment mask) -> overlay (blend mode per
@@ -670,9 +762,13 @@ export async function renderMockup(options: RenderMockupOptions): Promise<Buffer
     assertRenderableObject(obj, index, printArea);
   }
 
-  const base = sharp(options.baseImagePath, { limitInputPixels: MAX_INPUT_PIXELS })
+  // Materialize the base once: needed both as the luminance source for the
+  // fabric light-map and as the composite background.
+  const baseRaw = await sharp(options.baseImagePath, { limitInputPixels: MAX_INPUT_PIXELS })
     .resize(canvasWidth, canvasHeight, { fit: 'fill' })
-    .ensureAlpha();
+    .ensureAlpha()
+    .raw()
+    .toBuffer();
 
   const designLayers: sharp.OverlayOptions[] = [];
 
@@ -686,30 +782,65 @@ export async function renderMockup(options: RenderMockupOptions): Promise<Buffer
     designLayers.push({ input: prepared.input, left: prepared.left, top: prepared.top });
   }
 
-  const layers: sharp.OverlayOptions[] = [];
+  // Flatten the design onto a transparent canvas-sized sheet so the ink can be
+  // shaded as one layer (its relative stacking is already baked in).
+  const sheetRaw = await sharp({
+    create: { width: canvasWidth, height: canvasHeight, channels: 4, background: TRANSPARENT },
+  })
+    .composite(designLayers)
+    .raw()
+    .toBuffer();
 
+  // Fabric realism: multiply the garment's own folds/shadows into the ink so the
+  // print sits in the cloth instead of floating on top. Alpha is left untouched
+  // (transparent stays transparent), so this only ever touches placed ink.
+  const maskRaw = options.maskImagePath
+    ? await sharp(options.maskImagePath, { limitInputPixels: MAX_INPUT_PIXELS })
+        .resize(canvasWidth, canvasHeight, { fit: 'fill' })
+        .ensureAlpha()
+        .raw()
+        .toBuffer()
+    : null;
+  const { mul, lift } = buildInkLightMap(baseRaw, maskRaw, canvasWidth, canvasHeight);
+  for (let i = 0; i < canvasWidth * canvasHeight; i++) {
+    if (sheetRaw[i * 4 + 3] === 0) continue; // no ink here
+    const m = mul[i]!;
+    const l = lift[i]!;
+    for (let c = 0; c < 3; c++) {
+      const darkened = sheetRaw[i * 4 + c]! * m;
+      sheetRaw[i * 4 + c] = Math.max(0, Math.min(255, Math.round(darkened + (255 - darkened) * l)));
+    }
+  }
+
+  // Sub-pixel feather: real ink bleeds a hair into the weave, so the razor-crisp
+  // vector edge is the strongest "sticker" tell. A 0.6px blur softens the glyph/
+  // image edge into the fabric without visibly softening the artwork itself.
+  let sheet = await sharp(sheetRaw, { raw: { width: canvasWidth, height: canvasHeight, channels: 4 } })
+    .blur(0.6)
+    .png()
+    .toBuffer();
+
+  // Clip the shaded ink to the garment silhouette (photo templates) so artwork
+  // near an edge never bleeds onto the backdrop.
   if (options.maskImagePath) {
-    // Flatten the design onto a transparent canvas-sized sheet, then keep only the
-    // pixels where the mask is opaque (dest-in). One masked sheet replaces the
-    // individual layers; their relative stacking is already baked in.
     const mask = await loadCanvasSizedImage(options.maskImagePath, canvasWidth, canvasHeight);
-    const sheet = await sharp({
-      create: { width: canvasWidth, height: canvasHeight, channels: 4, background: TRANSPARENT },
-    })
-      .composite([...designLayers, { input: mask, left: 0, top: 0, blend: 'dest-in' }])
+    sheet = await sharp(sheet)
+      .composite([{ input: mask, left: 0, top: 0, blend: 'dest-in' }])
       .png()
       .toBuffer();
-    layers.push({ input: sheet, left: 0, top: 0 });
-  } else {
-    layers.push(...designLayers);
   }
+
+  const layers: sharp.OverlayOptions[] = [{ input: sheet, left: 0, top: 0 }];
 
   if (options.overlayImagePath) {
     const overlay = await loadCanvasSizedImage(options.overlayImagePath, canvasWidth, canvasHeight);
     layers.push({ input: overlay, left: 0, top: 0, blend: overlayBlend });
   }
 
-  return base.composite(layers).png().toBuffer();
+  return sharp(baseRaw, { raw: { width: canvasWidth, height: canvasHeight, channels: 4 } })
+    .composite(layers)
+    .png()
+    .toBuffer();
 }
 
 export interface RenderPrintFileOptions {

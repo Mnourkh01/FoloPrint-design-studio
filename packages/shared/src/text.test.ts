@@ -32,17 +32,19 @@ const errorsOf = (overrides: Partial<TextDesignObject>): string[] =>
   designObjectContentErrors(validText(overrides));
 
 describe('font whitelist', () => {
-  it('contains the six bundled fonts with license metadata', () => {
-    expect(FONT_WHITELIST.map((f) => f.key)).toEqual([
-      'inter',
-      'oswald',
-      'playfair',
-      'roboto-slab',
-      'caveat',
-      'noto-naskh-arabic',
-    ]);
+  it('keeps the original bundled fonts and only OFL/Apache licenses with a category', () => {
+    const keys = FONT_WHITELIST.map((f) => f.key);
+    // The original six must stay (stored designs reference these keys).
+    for (const original of ['inter', 'oswald', 'playfair', 'roboto-slab', 'caveat', 'noto-naskh-arabic']) {
+      expect(keys).toContain(original);
+    }
+    // Curated variety added on top of the original six.
+    expect(FONT_WHITELIST.length).toBeGreaterThanOrEqual(20);
+    // Keys are unique.
+    expect(new Set(keys).size).toBe(keys.length);
     for (const font of FONT_WHITELIST) {
       expect(['OFL-1.1', 'Apache-2.0']).toContain(font.license);
+      expect(['Sans', 'Display', 'Serif', 'Slab', 'Script', 'Fun', 'Arabic']).toContain(font.category);
     }
   });
 

@@ -80,7 +80,7 @@ test('text objects: add, style, move, resize, save, render, reopen', async ({ pa
   await expect(page.getByTestId('text-panel')).toBeVisible();
 
   // --- Style: font, color (swatch), size, align ---
-  await page.getByTestId('text-font-select').selectOption('oswald');
+  await page.getByTestId('font-pick-oswald').click();
   await page.getByTestId('text-swatch-cf3f22').click();
   await page.getByTestId('text-size-input').fill('36');
   await page.getByTestId('text-align-left').click();
@@ -180,10 +180,11 @@ test('text effects: outline and shadow set in the panel survive save, render, re
     () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { kind?: string }).kind === 'text'),
   );
 
-  // Enable both effects, set letter spacing, all through the panel controls.
-  await page.getByTestId('text-outline-toggle').check();
+  // Pick visual effect presets, then fine-tune the exact numbers under Advanced.
+  await page.getByTestId('fx-outline-white').click();
+  await page.getByTestId('fx-shadow-drop').click();
+  await page.getByTestId('text-advanced-toggle').click();
   await page.getByTestId('text-outline-width').fill('6');
-  await page.getByTestId('text-shadow-toggle').check();
   await page.getByTestId('text-shadow-x').fill('8');
   await page.getByTestId('text-letter-spacing-input').fill('10');
 

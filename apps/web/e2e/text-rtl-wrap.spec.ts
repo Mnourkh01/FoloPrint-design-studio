@@ -82,6 +82,9 @@ test('arabic text: auto RTL, wrap in box, reflow, save, render, reopen', async (
   );
   await typeIntoText(page, 'مرحبا بالعالم الواسع');
 
+  // Direction + wrap now live under the panel's Advanced disclosure.
+  await page.getByTestId('text-advanced-toggle').click();
+
   // Auto resolved to RTL: canvas direction flips, panel hints the resolution.
   const arabic = await getTextState(page);
   expect(arabic.text).toBe('مرحبا بالعالم الواسع');
@@ -91,7 +94,7 @@ test('arabic text: auto RTL, wrap in box, reflow, save, render, reopen', async (
   await expect(page.getByTestId('text-direction-auto')).toHaveClass(/btn--active/);
 
   // --- Arabic font ---
-  await page.getByTestId('text-font-select').selectOption('noto-naskh-arabic');
+  await page.getByTestId('font-pick-noto-naskh-arabic').click();
   expect((await getTextState(page)).fontKey).toBe('noto-naskh-arabic');
 
   // --- Wrap on: IText swaps to Textbox, content and direction preserved ---
@@ -174,6 +177,7 @@ test('arabic text: auto RTL, wrap in box, reflow, save, render, reopen', async (
     canvas.fire('selection:created', { selected: [text] });
     canvas.requestRenderAll();
   });
+  await page.getByTestId('text-advanced-toggle').click(); // wrap lives under Advanced
   await expect(page.getByTestId('text-wrap-toggle')).toBeChecked();
 });
 
@@ -189,6 +193,7 @@ test('overflow warning: more than 8 wrapped lines blocks saving', async ({ page 
 
   // Nine explicit lines wrap to nine visual lines in any box.
   await typeIntoText(page, Array(9).fill('سطر').join('\n'));
+  await page.getByTestId('text-advanced-toggle').click(); // wrap lives under Advanced
   await page.getByTestId('text-wrap-toggle').check();
 
   await expect(page.getByTestId('text-overflow-warning')).toBeVisible();

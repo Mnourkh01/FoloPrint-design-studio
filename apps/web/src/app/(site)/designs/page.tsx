@@ -2,6 +2,7 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { apiUrl, fetchDesigns } from '@/lib/api';
 import type { DesignListDto } from '@foloprint/shared';
+import { DesignCardActions } from './design-card-actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -142,6 +143,7 @@ export default async function DesignLibraryPage({
                     >
                       Edit design
                     </Link>
+                    <DesignCardActions designId={item.id} />
                   </div>
                 </div>
               </article>

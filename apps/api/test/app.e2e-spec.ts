@@ -971,6 +971,46 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('design management (v2.2): delete and duplicate', () => {
+    it('deletes a design with its rendered previews; the row and files are gone', async () => {
+      const asset = await uploadPng();
+      const design = await createFrontBackDesign(asset.id);
+      await http().post(`/designs/${design.id}/render`).expect(201);
+      await http().get(`/designs/${design.id}/preview/front`).expect(200);
+
+      await http().delete(`/designs/${design.id}`).expect(204);
+
+      await http().get(`/designs/${design.id}`).expect(404);
+      await http().get(`/designs/${design.id}/preview/front`).expect(404);
+      // Idempotence from the client's view: a second delete is a 404, not a 500.
+      await http().delete(`/designs/${design.id}`).expect(404);
+    });
+
+    it('duplicates a design: identical document, fresh id, no previews', async () => {
+      const asset = await uploadPng();
+      const design = await createFrontBackDesign(asset.id);
+      await http().post(`/designs/${design.id}/render`).expect(201);
+
+      const res = await http().post(`/designs/${design.id}/duplicate`).expect(201);
+      const copy = res.body as DesignProjectDto;
+
+      expect(copy.id).not.toBe(design.id);
+      expect(copy.design).toEqual(design.design);
+      expect(copy.templateId).toBe(design.templateId);
+      expect(copy.previews).toEqual([]); // the copy was never rendered
+
+      // The source keeps its previews; both rows exist independently.
+      await http().get(`/designs/${design.id}/preview/front`).expect(200);
+      await http().get(`/designs/${copy.id}`).expect(200);
+    });
+
+    it('404s for unknown designs and 400s for malformed ids', async () => {
+      await http().delete('/designs/00000000-0000-4000-8000-000000000000').expect(404);
+      await http().post('/designs/00000000-0000-4000-8000-000000000000/duplicate').expect(404);
+      await http().delete('/designs/not-a-uuid').expect(400);
+    });
+  });
+
   describe('print files (v2.2)', () => {
     it('streams the ink alone at 300dpi over the physical print size, transparent background', async () => {
       const asset = await uploadPng();

@@ -142,4 +142,25 @@ test.describe.serial('design library', () => {
     );
     await expect(page.getByTestId('editing-badge')).toContainText('Editing saved design');
   });
+
+  test('duplicate and delete from the library', async ({ page }) => {
+    await page.goto('/designs');
+    await expect(page.getByTestId('library-count')).toContainText('1');
+    const card = page.locator('[data-testid^="design-card-"][data-testid$="-card"], article.design-card').first();
+
+    // Duplicate: a second card appears (the copy has no previews yet).
+    await card.getByTestId('design-card-duplicate').click();
+    await expect(page.getByTestId('library-count')).toContainText('2');
+    await expect(page.getByTestId('design-card-no-preview')).toBeVisible();
+
+    // Delete the copy (newest first = the un-rendered one); confirm dialog accepted.
+    page.on('dialog', (dialog) => void dialog.accept());
+    await page
+      .locator('article.design-card')
+      .first()
+      .getByTestId('design-card-delete')
+      .click();
+    await expect(page.getByTestId('library-count')).toContainText('1');
+    await expect(page.getByTestId('design-card-no-preview')).not.toBeVisible();
+  });
 });

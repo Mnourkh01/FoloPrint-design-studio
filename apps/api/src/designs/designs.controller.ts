@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   HttpCode,
@@ -50,6 +51,20 @@ export class DesignsController {
     @Body() dto: CreateDesignDto,
   ): Promise<DesignProjectDto> {
     return this.designs.update(id, dto);
+  }
+
+  /** Deletes a design and its rendered preview files. */
+  @Delete(':id')
+  @HttpCode(204)
+  async remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    await this.designs.remove(id);
+  }
+
+  /** Duplicates a design (same template + document, no previews). */
+  @Post(':id/duplicate')
+  @HttpCode(201)
+  duplicate(@Param('id', ParseUUIDPipe) id: string): Promise<DesignProjectDto> {
+    return this.designs.duplicate(id);
   }
 
   /** Renders every placement; one preview per print area. */

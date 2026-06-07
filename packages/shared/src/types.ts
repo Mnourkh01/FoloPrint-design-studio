@@ -128,6 +128,13 @@ export interface TextDesignObject extends DesignObjectBase {
    * the renderer to Pango letter_spacing.
    */
   letterSpacing?: number;
+  /**
+   * Arc bend (v1.8): the sweep angle in degrees the text covers on a circle.
+   * Positive bows upward, negative downward; absent = straight. Single visual
+   * line, LTR content only, and not combinable with wrap, outline, or shadow
+   * (per-glyph layout; see layoutArcGlyphs).
+   */
+  arc?: number;
 }
 
 /**

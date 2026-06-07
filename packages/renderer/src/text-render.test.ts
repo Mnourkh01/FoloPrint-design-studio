@@ -375,6 +375,58 @@ describe('renderMockup text outline and shadow (v1.8)', () => {
   });
 });
 
+describe('renderMockup arc text (v1.8)', () => {
+  const render = (overrides: Partial<RenderTextObject>) =>
+    renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [textObject({ lines: ['CURVED'], height: 100, ...overrides })],
+    });
+
+  it('renders arced glyphs inside the stored box and differs from straight text', async () => {
+    const straight = await render({});
+    const arced = await render({ arc: 120 });
+
+    expect(arced.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+    expect(arced.equals(straight)).toBe(false);
+
+    // Glyph ink present inside the box (120..280 x 150..250)...
+    const inside = await countRedPixels(arced, { left: 120, top: 150, width: 160, height: 100 });
+    expect(inside).toBeGreaterThan(50);
+    // ...and clipped to it.
+    const above = await countRedPixels(arced, { left: 110, top: 135, width: 180, height: 10 });
+    const below = await countRedPixels(arced, { left: 110, top: 255, width: 180, height: 10 });
+    expect(above + below).toBe(0);
+  });
+
+  it('positive and negative sweeps bow in opposite directions', async () => {
+    const up = await render({ arc: 140 });
+    const down = await render({ arc: -140 });
+    expect(up.equals(down)).toBe(false);
+
+    // Upward bow: the middle of the run sits high in the box, so the top-center
+    // band carries more ink than it does for the downward bow.
+    const band = { left: 170, top: 152, width: 60, height: 25 };
+    const upInk = await countRedPixels(up, band);
+    const downInk = await countRedPixels(down, band);
+    expect(upInk).toBeGreaterThan(downInk);
+  });
+
+  it('rejects invalid arcs and unsupported combinations', async () => {
+    await expect(render({ arc: 0 })).rejects.toThrow(RenderValidationError);
+    await expect(render({ arc: 999 })).rejects.toThrow(RenderValidationError);
+    await expect(render({ arc: 90, lines: ['two', 'lines'] })).rejects.toThrow(
+      RenderValidationError,
+    );
+    await expect(render({ arc: 90, direction: 'rtl' })).rejects.toThrow(RenderValidationError);
+    await expect(
+      render({ arc: 90, outline: { color: '#00cc00', width: 4 } }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});
+
 describe('renderMockup RTL/Arabic (v1.6)', () => {
   it('shapes Arabic: joined word materially narrower than isolated letters (spike S1)', async () => {
     const joined = await arabicRasterWidth('مرحبا بالعالم');

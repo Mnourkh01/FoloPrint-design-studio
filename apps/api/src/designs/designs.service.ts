@@ -217,6 +217,7 @@ export class DesignsService {
           ? { shadow: { color: o.shadow.color, offsetX: o.shadow.offsetX, offsetY: o.shadow.offsetY } }
           : {}),
         ...(o.letterSpacing !== undefined ? { letterSpacing: o.letterSpacing } : {}),
+        ...(o.arc !== undefined ? { arc: o.arc } : {}),
         ...base,
       };
     }
@@ -292,6 +293,7 @@ export class DesignsService {
             ...(obj.outline ? { outline: obj.outline } : {}),
             ...(obj.shadow ? { shadow: obj.shadow } : {}),
             ...(obj.letterSpacing ? { letterSpacing: obj.letterSpacing } : {}),
+            ...(obj.arc ? { arc: obj.arc } : {}),
             ...base,
           };
         }

@@ -378,6 +378,31 @@ describe('designObjectContentErrors for text outline and shadow (v1.8)', () => {
     );
   });
 
+  it('accepts a valid arc and rejects its forbidden combinations', () => {
+    expect(errorsOf({ arc: 90 })).toEqual([]);
+    expect(errorsOf({ arc: -180 })).toEqual([]);
+    expect(errorsOf({ arc: 12, letterSpacing: 10 })).toEqual([]); // spacing combines
+
+    expect(errorsOf({ arc: 0 })).toContainEqual(expect.stringMatching(/Arc must be/));
+    expect(errorsOf({ arc: 181 })).toContainEqual(expect.stringMatching(/Arc must be/));
+    expect(errorsOf({ arc: Number.NaN })).toContainEqual(expect.stringMatching(/Arc must be/));
+    expect(
+      errorsOf({ arc: 90, wrapMode: 'box', wrappedLines: ['Hello world'] }),
+    ).toContainEqual(expect.stringMatching(/wrap-in-box/));
+    expect(errorsOf({ arc: 90, text: 'two\nlines' })).toContainEqual(
+      expect.stringMatching(/single line/),
+    );
+    expect(errorsOf({ arc: 90, text: 'مرحبا' })).toContainEqual(
+      expect.stringMatching(/right-to-left/),
+    );
+    expect(errorsOf({ arc: 90, outline: { color: '#ffffff', width: 2 } })).toContainEqual(
+      expect.stringMatching(/outline or shadow/),
+    );
+    expect(
+      errorsOf({ arc: 90, shadow: { color: '#000000', offsetX: 4, offsetY: 4 } }),
+    ).toContainEqual(expect.stringMatching(/outline or shadow/));
+  });
+
   it('accepts in-range letter spacing and rejects out-of-range values', () => {
     expect(errorsOf({ letterSpacing: 0 })).toEqual([]);
     expect(errorsOf({ letterSpacing: -20 })).toEqual([]);

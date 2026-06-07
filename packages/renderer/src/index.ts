@@ -1,7 +1,10 @@
 import sharp from 'sharp';
 import {
+  ARC_SWEEP_MAX,
+  ARC_SWEEP_MIN,
   HEX_COLOR_PATTERN,
   isObjectInsideRect,
+  layoutArcGlyphs,
   LETTER_SPACING_MAX,
   LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
@@ -108,6 +111,11 @@ export interface RenderTextObject extends RenderObjectGeometry {
   shadow?: TextShadow;
   /** Extra space between glyphs in canvas px (v1.8); 0/absent = font default. */
   letterSpacing?: number;
+  /**
+   * Arc sweep in degrees (v1.8); absent = straight. Single LTR line only, never
+   * combined with outline/shadow (validated upstream and asserted here).
+   */
+  arc?: number;
 }
 
 export type RenderObject = RenderImageObject | RenderTextObject;
@@ -312,6 +320,121 @@ async function tintAlpha(
 }
 
 /**
+ * Per-glyph arc rendering (v1.8). Each character is rastered alone with Pango,
+ * tinted, rotated to its tangent, and composited at the position the SHARED
+ * layoutArcGlyphs computed from this side's own measured advances. The sheet is
+ * clipped to the layout bounds (the editor's raster has the same bounds), then
+ * joins the normal fit-to-stored-box + finalize pipeline, so whole-block
+ * rotation and metric-drift absorption work exactly like straight text.
+ */
+async function prepareArcTextLayer(obj: RenderTextObject): Promise<PreparedLayer> {
+  const font = resolveFont(obj.fontFamily);
+  const chars = [...obj.lines[0]!];
+
+  const rasterChar = async (
+    char: string,
+  ): Promise<{ buf: Buffer; width: number; height: number } | null> => {
+    try {
+      const buf = await sharp({
+        text: {
+          text: escapePangoMarkup(char),
+          font: `${font.family} ${obj.fontSize}`,
+          fontfile: font.filePath,
+          rgba: true,
+          dpi: TEXT_DPI,
+        },
+      })
+        .png()
+        .toBuffer();
+      const meta = await sharp(buf).metadata();
+      if (!meta.width || !meta.height) return null;
+      return { buf, width: meta.width, height: meta.height };
+    } catch {
+      return null; // whitespace and zero-ink chars advance without drawing
+    }
+  };
+
+  // Space advance: Pango cannot raster lone whitespace; derive it from the
+  // width difference of "a a" vs "aa" once per call.
+  const spaceAdvance = async (): Promise<number> => {
+    const [spaced, joined] = await Promise.all([rasterChar('a a'), rasterChar('aa')]);
+    if (!spaced || !joined) return obj.fontSize * 0.3;
+    return Math.max(2, spaced.width - joined.width);
+  };
+
+  const cache = new Map<string, { buf: Buffer; width: number; height: number } | null>();
+  let spaceWidth: number | null = null;
+  const glyphs: ({ buf: Buffer; width: number; height: number } | null)[] = [];
+  const advances: number[] = [];
+  for (const char of chars) {
+    if (/\s/.test(char)) {
+      spaceWidth ??= await spaceAdvance();
+      glyphs.push(null);
+      advances.push(spaceWidth);
+      continue;
+    }
+    if (!cache.has(char)) cache.set(char, await rasterChar(char));
+    const glyph = cache.get(char)!;
+    glyphs.push(glyph);
+    advances.push(glyph ? glyph.width : obj.fontSize * 0.3);
+  }
+
+  const layout = layoutArcGlyphs(advances, obj.fontSize, obj.arc!, obj.letterSpacing ?? 0);
+  if (layout.positions.length === 0 || layout.width <= 0 || layout.height <= 0) {
+    throw new RenderValidationError('Arc text rendered to an empty layout');
+  }
+
+  // Rotated glyph corners can poke past the bounds proxy; pad, composite, clip back.
+  const margin = Math.ceil(obj.fontSize);
+  const sheetW = Math.ceil(layout.width) + 2 * margin;
+  const sheetH = Math.ceil(layout.height) + 2 * margin;
+
+  const layers: sharp.OverlayOptions[] = [];
+  for (let i = 0; i < glyphs.length; i++) {
+    const glyph = glyphs[i];
+    if (!glyph) continue;
+    const placement = layout.positions[i]!;
+    let buf = await tintAlpha(glyph.buf, glyph.width, glyph.height, obj.color);
+    let w = glyph.width;
+    let h = glyph.height;
+    if (Math.round(placement.rotationDeg) % 360 !== 0) {
+      buf = await sharp(buf).rotate(placement.rotationDeg, { background: TRANSPARENT }).png().toBuffer();
+      const meta = await sharp(buf).metadata();
+      w = meta.width ?? w;
+      h = meta.height ?? h;
+    }
+    layers.push({
+      input: buf,
+      left: Math.round(placement.x + margin - w / 2),
+      top: Math.round(placement.y + margin - h / 2),
+    });
+  }
+
+  const sheet = await sharp({
+    create: { width: sheetW, height: sheetH, channels: 4, background: TRANSPARENT },
+  })
+    .composite(layers)
+    .png()
+    .toBuffer();
+  const clipped = await sharp(sheet)
+    .extract({
+      left: margin,
+      top: margin,
+      width: Math.ceil(layout.width),
+      height: Math.ceil(layout.height),
+    })
+    .png()
+    .toBuffer();
+
+  const fitted = await sharp(clipped)
+    .resize(Math.round(obj.width), Math.round(obj.height), { fit: 'fill' })
+    .png()
+    .toBuffer();
+
+  return finalizeLayer(fitted, obj);
+}
+
+/**
  * Rasterize text with Pango, apply v1.8 effects, fit it into the stored box, then
  * rotate and position.
  *
@@ -330,6 +453,7 @@ async function tintAlpha(
  * into a markup or SVG string.
  */
 async function prepareTextLayer(obj: RenderTextObject): Promise<PreparedLayer> {
+  if (obj.arc) return prepareArcTextLayer(obj);
   const font = resolveFont(obj.fontFamily); // throws UnknownFontError on non-whitelist keys
 
   // Each line gets the resolved direction mark so every Pango paragraph shares the
@@ -490,6 +614,21 @@ function assertRenderableObject(obj: RenderObject, index: number, printArea: Rec
         obj.letterSpacing > LETTER_SPACING_MAX
       ) {
         throw new RenderValidationError(`Design object ${index} has an invalid letter spacing`);
+      }
+    }
+    if (obj.arc !== undefined) {
+      if (
+        !Number.isFinite(obj.arc) ||
+        obj.arc === 0 ||
+        obj.arc < ARC_SWEEP_MIN ||
+        obj.arc > ARC_SWEEP_MAX
+      ) {
+        throw new RenderValidationError(`Design object ${index} has an invalid arc`);
+      }
+      if (obj.lines.length !== 1 || obj.direction !== 'ltr' || obj.outline || obj.shadow) {
+        throw new RenderValidationError(
+          `Design object ${index} combines arc with an unsupported option`,
+        );
       }
     }
   }

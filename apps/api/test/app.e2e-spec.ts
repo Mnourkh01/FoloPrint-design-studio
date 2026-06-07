@@ -1144,6 +1144,33 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       await postFront([textIn(area('front'), { letterSpacing: 101 })]).expect(400);
     });
 
+    it('saves, renders, and reopens arced text', async () => {
+      const res = await postFront([textIn(area('front'), { arc: 120, letterSpacing: 6 })]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({ arc: 120, letterSpacing: 6 });
+
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      await http().get(`/designs/${dto.id}/preview/front`).expect(200);
+
+      const reopened = await http().get(`/designs/${dto.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        arc: 120,
+      });
+    });
+
+    it('rejects invalid arcs and forbidden arc combinations', async () => {
+      await postFront([textIn(area('front'), { arc: 0 })]).expect(400);
+      await postFront([textIn(area('front'), { arc: 181 })]).expect(400);
+      const multi = await postFront([textIn(area('front'), { arc: 90, text: 'two\nlines' })]).expect(400);
+      expect(JSON.stringify(multi.body)).toMatch(/single line/i);
+      const rtl = await postFront([textIn(area('front'), { arc: 90, text: 'مرحبا' })]).expect(400);
+      expect(JSON.stringify(rtl.body)).toMatch(/right-to-left/i);
+      const combo = await postFront([
+        textIn(area('front'), { arc: 90, outline: { color: '#ffffff', width: 4 } }),
+      ]).expect(400);
+      expect(JSON.stringify(combo.body)).toMatch(/outline or shadow/i);
+    });
+
     it('renders text containing markup characters literally (escaping regression)', async () => {
       const res = await postFront([
         textIn(area('front'), { text: 'a < b & <b>c</b>', letterSpacing: 8 }),

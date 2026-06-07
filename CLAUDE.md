@@ -78,7 +78,14 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   charSpacing in the editor, Pango letter_spacing span on the server. libvips
   parses the text param as Pango MARKUP, so the renderer markup-escapes every
   user line (`escapePangoMarkup`); only validated numeric attribute values are
-  ever emitted as markup.
+  ever emitted as markup. Optional `arc` (sweep degrees, ±180, non-zero): single
+  LTR line only, never combined with wrap/outline/shadow (validated 3 layers).
+  Both sides run the SAME shared `layoutArcGlyphs` (per-glyph position+tangent
+  from measured advances) so they agree; editor measures with canvas measureText
+  and rasters arced text to an offscreen canvas inside a Fabric image (kind 'text',
+  `arcProps` tag, panel wording input instead of inline edit), the server rasters
+  per-glyph with Pango. Residual metric drift is absorbed by the shared
+  fit-to-stored-box step.
 - Storage paths in DB are relative to `STORAGE_ROOT`; `StorageService` is the only place that
   touches the filesystem layout.
 - DTO validation with class-validator (`whitelist + forbidNonWhitelisted + transform`).

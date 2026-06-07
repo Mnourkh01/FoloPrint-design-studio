@@ -1,3 +1,4 @@
+import { ARC_SWEEP_MAX, ARC_SWEEP_MIN } from './arc';
 import { isFontFamilyKey } from './fonts';
 import { PATTERN_TYPES } from './types';
 import type {
@@ -125,7 +126,8 @@ function imageObjectContentErrors(
     carried.wrappedLines !== undefined ||
     carried.outline !== undefined ||
     carried.shadow !== undefined ||
-    carried.letterSpacing !== undefined
+    carried.letterSpacing !== undefined ||
+    carried.arc !== undefined
   ) {
     errors.push('Image object must not carry text fields');
   }
@@ -225,6 +227,31 @@ function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text'
       obj.letterSpacing > LETTER_SPACING_MAX)
   ) {
     errors.push(`Letter spacing must be between ${LETTER_SPACING_MIN} and ${LETTER_SPACING_MAX}`);
+  }
+
+  if (obj.arc !== undefined) {
+    if (
+      !isFiniteNumber(obj.arc) ||
+      obj.arc === 0 ||
+      obj.arc < ARC_SWEEP_MIN ||
+      obj.arc > ARC_SWEEP_MAX
+    ) {
+      errors.push(
+        `Arc must be a non-zero sweep between ${ARC_SWEEP_MIN} and ${ARC_SWEEP_MAX} degrees`,
+      );
+    }
+    if (wrapMode === 'box') {
+      errors.push('Arc cannot be combined with wrap-in-box');
+    }
+    if (typeof obj.text === 'string' && obj.text.includes('\n')) {
+      errors.push('Arc text must be a single line');
+    }
+    if (typeof obj.text === 'string' && STRONG_RTL.test(obj.text)) {
+      errors.push('Arc is not supported for right-to-left text');
+    }
+    if (obj.outline !== undefined || obj.shadow !== undefined) {
+      errors.push('Arc cannot be combined with outline or shadow');
+    }
   }
 
   return errors;

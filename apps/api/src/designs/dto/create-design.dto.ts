@@ -17,6 +17,8 @@ import {
   ValidateNested,
 } from 'class-validator';
 import {
+  ARC_SWEEP_MAX,
+  ARC_SWEEP_MIN,
   FONT_KEYS,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
@@ -204,6 +206,18 @@ export class DesignObjectDto {
   @Min(LETTER_SPACING_MIN)
   @Max(LETTER_SPACING_MAX)
   letterSpacing?: number;
+
+  /**
+   * Arc sweep, degrees (v1.8); missing means straight. The non-zero rule and the
+   * forbidden combinations (wrap, multi-line, RTL, outline, shadow) are enforced
+   * by the shared validation the service runs as the authority.
+   */
+  @ValidateIf(isText)
+  @IsOptional()
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(ARC_SWEEP_MIN)
+  @Max(ARC_SWEEP_MAX)
+  arc?: number;
 }
 
 /** All artwork for one print area. Placements with zero objects are rejected. */

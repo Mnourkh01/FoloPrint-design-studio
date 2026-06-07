@@ -5,11 +5,15 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Canvas, FabricImage, IText, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
+  ARC_GLYPH_HEIGHT_FACTOR,
+  ARC_SWEEP_MAX,
+  ARC_SWEEP_MIN,
   evaluateObjectQuality,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   FONT_WHITELIST,
   fontDefinitionOf,
+  layoutArcGlyphs,
   LETTER_SPACING_MAX,
   LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
@@ -315,6 +319,26 @@ type PatternPreviewRect = Rect & {
 /** IText for plain text, Textbox when wrap-in-box is on (same prop surface). */
 type DesignedText = (IText | Textbox) & DesignedObject;
 
+/**
+ * Arced text (v1.8) is a FabricImage carrying its text metadata, because per-glyph
+ * curved layout can't live in an IText. It is still `kind: 'text'` and serializes
+ * as a text object with `arc`; both the editor raster and the server render use the
+ * shared layoutArcGlyphs, so they agree. Inline editing is replaced by a panel
+ * wording input. `arcProps` present is the discriminator.
+ */
+interface ArcTextProps {
+  text: string;
+  fontKey: string;
+  fontSize: number;
+  color: string;
+  align: TextAlign;
+  letterSpacing: number;
+  arc: number;
+}
+type DesignedArcText = FabricImage & DesignedObject & { arcProps: ArcTextProps };
+const isArcText = (obj: DesignedObject | undefined | null): obj is DesignedArcText =>
+  Boolean(obj && (obj as DesignedArcText).arcProps);
+
 /** Visual line count: Fabric's textLines includes soft wraps for Textbox. */
 const visualLineCountOf = (t: DesignedText): number =>
   t instanceof Textbox ? t.textLines.length : (t.text ?? '').split('\n').length;
@@ -358,6 +382,8 @@ interface SelectionReadout {
     shadow: TextShadow | null;
     /** v1.8 letter spacing in canvas px at the current effective size; 0 = default. */
     letterSpacing: number;
+    /** v1.8 arc sweep in degrees; null = straight. */
+    arc: number | null;
   } | null;
 }
 
@@ -428,6 +454,9 @@ export function EditorClient({
 
   /** Open contextual object tool (toolbar above the stage); null = toolbar only. */
   const [objectTool, setObjectTool] = useState<'transform' | 'position' | 'pattern' | null>(null);
+
+  /** Local mirror of the selected arc text's wording, for the panel input. */
+  const [arcWording, setArcWording] = useState('');
 
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
@@ -703,8 +732,24 @@ export function EditorClient({
             }
           : null;
       const t = designed as DesignedText;
-      const text =
-        designed.kind === 'text'
+      // Arced text is a tagged image; its panel state comes from arcProps, scaled
+      // size and effects (none allowed) excluded.
+      const text = isArcText(designed)
+        ? {
+            fontKey: designed.arcProps.fontKey,
+            color: designed.arcProps.color,
+            fontSize: Math.round(designed.arcProps.fontSize * (designed.scaleY ?? 1)),
+            align: designed.arcProps.align,
+            direction: 'ltr' as TextDirection,
+            resolvedDirection: 'ltr' as const,
+            wrap: false,
+            lineCount: 1,
+            outline: null,
+            shadow: null,
+            letterSpacing: designed.arcProps.letterSpacing * (designed.scaleY ?? 1),
+            arc: designed.arcProps.arc,
+          }
+        : designed.kind === 'text'
           ? {
               fontKey: designed.fontKey ?? TEXT_DEFAULTS.fontKey,
               color: typeof t.fill === 'string' ? (t.fill as string) : TEXT_DEFAULTS.color,
@@ -735,6 +780,7 @@ export function EditorClient({
                 ((t.charSpacing ?? 0) / 1000) *
                 (t.fontSize ?? TEXT_DEFAULTS.fontSize) *
                 (designed.scaleY ?? 1),
+              arc: null,
             }
           : null;
       setSelection({
@@ -931,6 +977,11 @@ export function EditorClient({
    * Waits for the fonts: measuring with a fallback would distort the
    * scale-to-stored-box math.
    */
+  /** Late-bound makeArcText (defined below) so restore can build arc text too. */
+  const makeArcTextRef = useRef<(props: ArcTextProps, areaKey: string) => DesignedArcText | null>(
+    () => null,
+  );
+
   const restoreTextObject = useCallback(
     (saved: Extract<DesignObject, { type: 'text' }>, areaKey: string): Promise<void> => {
       const canvas = canvasRef.current;
@@ -939,6 +990,34 @@ export function EditorClient({
         .catch(() => undefined) // degraded measurement beats losing the object
         .then(() => {
           if (canvasRef.current !== canvas) return;
+          const mine = areaKey === activeAreaKeyRef.current;
+          // Arced text restores as a re-rastered image (same layoutArcGlyphs).
+          if (saved.arc) {
+            const arc = makeArcTextRef.current(
+              {
+                text: saved.text,
+                fontKey: saved.fontFamily,
+                fontSize: saved.fontSize,
+                color: saved.color,
+                align: saved.align,
+                letterSpacing: saved.letterSpacing ?? 0,
+                arc: saved.arc,
+              },
+              areaKey,
+            );
+            if (!arc) return;
+            arc.set({ left: saved.x, top: saved.y, angle: saved.rotation, visible: mine, evented: mine, selectable: mine });
+            const naturalWidth = arc.getScaledWidth();
+            const naturalHeight = arc.getScaledHeight();
+            if (naturalWidth && naturalHeight) {
+              arc.set({ scaleX: saved.width / naturalWidth, scaleY: saved.height / naturalHeight });
+            }
+            arc.setCoords();
+            canvas.add(arc);
+            canvas.requestRenderAll();
+            refreshAreaCounts();
+            return;
+          }
           const isBox = saved.wrapMode === 'box';
           const itext = makeDesignedText(saved.text, areaKey, {
             fontKey: saved.fontFamily,
@@ -954,7 +1033,6 @@ export function EditorClient({
             shadow: saved.shadow,
             letterSpacing: saved.letterSpacing,
           });
-          const mine = areaKey === activeAreaKeyRef.current;
           itext.set({
             left: saved.x,
             top: saved.y,
@@ -988,6 +1066,72 @@ export function EditorClient({
     },
     [makeDesignedText, refreshAreaCounts],
   );
+
+  /**
+   * Rasters arced text to an offscreen canvas using the shared layoutArcGlyphs
+   * (canvas measureText advances), at 2x for crispness. The canvas is exactly the
+   * layout bounds, so rotated glyphs clip identically to the server. Fonts must be
+   * loaded first (the caller awaits ensureEditorFonts).
+   */
+  const rasterizeArcText = useCallback((props: ArcTextProps): HTMLCanvasElement | null => {
+    const definition = fontDefinitionOf(props.fontKey) ?? FONT_WHITELIST[0];
+    const SS = 2; // supersample
+    const measure = document.createElement('canvas').getContext('2d');
+    if (!measure) return null;
+    measure.font = `${props.fontSize}px "${definition.family}"`;
+    const chars = [...props.text];
+    const advances = chars.map((c) => Math.max(1, measure.measureText(c).width));
+    const layout = layoutArcGlyphs(advances, props.fontSize, props.arc, props.letterSpacing);
+    if (layout.positions.length === 0 || layout.width <= 0 || layout.height <= 0) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(layout.width) * SS;
+    canvas.height = Math.ceil(layout.height) * SS;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.scale(SS, SS);
+    ctx.font = `${props.fontSize}px "${definition.family}"`;
+    ctx.fillStyle = props.color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    chars.forEach((char, i) => {
+      const p = layout.positions[i]!;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate((p.rotationDeg * Math.PI) / 180);
+      ctx.fillText(char, 0, 0);
+      ctx.restore();
+    });
+    return canvas;
+  }, []);
+
+  /**
+   * Builds (or rebuilds) an arced-text FabricImage from props. Display size = the
+   * raster's layout px at scale 1, so getScaledWidth/Height serialize the box the
+   * server fits its own arc raster into. Center/area/angle are set by the caller.
+   */
+  const makeArcText = useCallback(
+    (props: ArcTextProps, areaKey: string): DesignedArcText | null => {
+      const raster = rasterizeArcText(props);
+      if (!raster) return null;
+      const SS = 2;
+      const img = new FabricImage(raster, {
+        originX: 'center',
+        originY: 'center',
+        scaleX: 1 / SS,
+        scaleY: 1 / SS,
+      }) as DesignedArcText;
+      applySelectionStyle(img);
+      img.kind = 'text';
+      img.printAreaKey = areaKey;
+      img.arcProps = props;
+      // Uniform corner scaling only; the raster is a baked unit.
+      img.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false });
+      return img;
+    },
+    [rasterizeArcText],
+  );
+  makeArcTextRef.current = makeArcText;
 
   /** Loads a view image (base or overlay) into the per-area cache. */
   const loadViewImage = useCallback(
@@ -1643,6 +1787,12 @@ export function EditorClient({
     if (!selection) setObjectTool(null);
   }, [selection]);
 
+  /** Sync the arc wording input to the active arc-text selection. */
+  useEffect(() => {
+    const active = canvasRef.current?.getActiveObject() as DesignedObject | undefined;
+    if (isArcText(active)) setArcWording(active.arcProps.text);
+  }, [selection]);
+
   /**
    * Applies a geometry change to the selected object (any kind), then re-fits it
    * to its print area and refreshes the readout. The object-tools counterpart of
@@ -1729,6 +1879,101 @@ export function EditorClient({
     [fitToPrintArea, refreshPatternPreview, readSelection, markMutated],
   );
 
+  /**
+   * Rebuilds the selected arced-text image from changed props (font, color, size,
+   * align, spacing, or arc value). Preserves center/angle and re-fits to the area.
+   */
+  const setArcProps = useCallback(
+    (partial: Partial<ArcTextProps>) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || !isArcText(active)) return;
+      const replacement = makeArcText(
+        { ...active.arcProps, ...partial },
+        active.printAreaKey ?? activeAreaKeyRef.current,
+      );
+      if (!replacement) return;
+      replacement.set({ left: active.left, top: active.top, angle: active.angle });
+      canvas.remove(active);
+      replacement.setCoords();
+      fitToPrintArea(replacement);
+      canvas.add(replacement);
+      canvas.setActiveObject(replacement);
+      canvas.requestRenderAll();
+      readSelection(replacement);
+      markMutated();
+    },
+    [makeArcText, fitToPrintArea, readSelection, markMutated],
+  );
+
+  /**
+   * Toggles/sets the arc on the selected text. null straightens it back to an
+   * IText; a number bends a straight IText (or re-bends an existing arc). Arc text
+   * is LTR single-line with no wrap/outline/shadow, so the conversions strip those.
+   */
+  const setArc = useCallback(
+    (arc: number | null) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'text') return;
+
+      if (isArcText(active)) {
+        if (arc === null) {
+          // Arc -> straight IText, baking the display scale into the props.
+          const scale = active.scaleY ?? 1;
+          const p = active.arcProps;
+          const itext = makeDesignedText(p.text, active.printAreaKey ?? activeAreaKeyRef.current, {
+            fontKey: p.fontKey,
+            fontSize: Math.min(Math.max(p.fontSize * scale, FONT_SIZE_MIN), FONT_SIZE_MAX),
+            color: p.color,
+            align: p.align,
+            direction: 'auto',
+            letterSpacing: p.letterSpacing * scale || undefined,
+          });
+          itext.set({ left: active.left, top: active.top, angle: active.angle });
+          canvas.remove(active);
+          itext.setCoords();
+          fitToPrintArea(itext);
+          canvas.add(itext);
+          canvas.setActiveObject(itext);
+          canvas.requestRenderAll();
+          readSelection(itext);
+          markMutated();
+        } else {
+          setArcProps({ arc });
+        }
+        return;
+      }
+
+      if (arc === null) return; // already straight
+      // Straight IText -> arc image. Wrap boxes can't arc (guarded in the UI).
+      const t = active as DesignedText;
+      if (t instanceof Textbox) return;
+      const scale = t.scaleY ?? 1;
+      const props: ArcTextProps = {
+        text: (t.text ?? 'Your text').replace(/\n+/g, ' '),
+        fontKey: t.fontKey ?? TEXT_DEFAULTS.fontKey,
+        fontSize: Math.min(Math.max((t.fontSize ?? TEXT_DEFAULTS.fontSize) * scale, FONT_SIZE_MIN), FONT_SIZE_MAX),
+        color: typeof t.fill === 'string' ? t.fill : TEXT_DEFAULTS.color,
+        align: (t.textAlign as TextAlign) ?? TEXT_DEFAULTS.align,
+        letterSpacing: ((t.charSpacing ?? 0) / 1000) * (t.fontSize ?? TEXT_DEFAULTS.fontSize) * scale,
+        arc,
+      };
+      const replacement = makeArcText(props, t.printAreaKey ?? activeAreaKeyRef.current);
+      if (!replacement) return;
+      replacement.set({ left: t.left, top: t.top, angle: t.angle });
+      canvas.remove(t);
+      replacement.setCoords();
+      fitToPrintArea(replacement);
+      canvas.add(replacement);
+      canvas.setActiveObject(replacement);
+      canvas.requestRenderAll();
+      readSelection(replacement);
+      markMutated();
+    },
+    [makeArcText, makeDesignedText, fitToPrintArea, readSelection, markMutated, setArcProps],
+  );
+
   /** Sets the contract direction and re-resolves Fabric's rendered direction. */
   const setTextDirection = useCallback(
     (direction: TextDirection) =>
@@ -1807,6 +2052,40 @@ export function EditorClient({
       if (!obj.printAreaKey) continue;
 
       let serialized: DesignObject | null = null;
+      if (isArcText(obj)) {
+        // Arced text: a tagged image; emit a text object with arc. Scale bakes
+        // into fontSize/letterSpacing, the box is the displayed raster box.
+        const scale = obj.scaleY ?? 1;
+        const p = obj.arcProps;
+        serialized = {
+          type: 'text',
+          text: p.text,
+          fontFamily: p.fontKey,
+          fontSize: Math.min(Math.max(p.fontSize * scale, FONT_SIZE_MIN), FONT_SIZE_MAX),
+          color: p.color,
+          align: p.align,
+          direction: 'ltr',
+          wrapMode: 'none',
+          arc: p.arc,
+          ...(p.letterSpacing
+            ? {
+                letterSpacing: Math.min(
+                  Math.max(p.letterSpacing * scale, LETTER_SPACING_MIN),
+                  LETTER_SPACING_MAX,
+                ),
+              }
+            : {}),
+          x: obj.left ?? 0,
+          y: obj.top ?? 0,
+          width: obj.getScaledWidth(),
+          height: obj.getScaledHeight(),
+          rotation: (obj.angle ?? 0) % 360,
+        };
+        const list = byArea.get(obj.printAreaKey) ?? [];
+        list.push(serialized);
+        byArea.set(obj.printAreaKey, list);
+        continue;
+      }
       if (obj.kind === 'text') {
         const t = obj as DesignedText;
         const isBox = t instanceof Textbox;
@@ -2165,7 +2444,29 @@ export function EditorClient({
       </div>
       {selection.text && (
         <div className="text-panel" data-testid="text-panel">
-          <p className="text-panel__hint">Double-click the text on the canvas to edit the wording.</p>
+          <p className="text-panel__hint">
+            {selection.text.arc !== null
+              ? 'Edit the curved wording in the field below.'
+              : 'Double-click the text on the canvas to edit the wording.'}
+          </p>
+          {selection.text.arc !== null && (
+            <label className="text-panel__field">
+              Wording
+              <input
+                type="text"
+                data-testid="arc-text-input"
+                value={selection.text.arc !== null ? arcWording : ''}
+                onChange={(e) => setArcWording(e.target.value)}
+                onBlur={() => {
+                  const next = arcWording.trim() || 'Your text';
+                  setArcProps({ text: next });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+              />
+            </label>
+          )}
           <label className="text-panel__field">
             Font
             <select
@@ -2175,6 +2476,10 @@ export function EditorClient({
                 const key = e.target.value;
                 const family = fontDefinitionOf(key)?.family;
                 if (!family) return;
+                if (selection.text!.arc !== null) {
+                  setArcProps({ fontKey: key });
+                  return;
+                }
                 updateActiveText((t) => {
                   t.fontKey = key;
                   t.set({ fontFamily: family });
@@ -2199,7 +2504,11 @@ export function EditorClient({
                   data-testid={`text-swatch-${swatch.slice(1)}`}
                   style={{ background: swatch }}
                   aria-label={`Text color ${swatch}`}
-                  onClick={() => updateActiveText((t) => t.set({ fill: swatch }))}
+                  onClick={() =>
+                    selection.text!.arc !== null
+                      ? setArcProps({ color: swatch })
+                      : updateActiveText((t) => t.set({ fill: swatch }))
+                  }
                 />
               ))}
               <input
@@ -2208,6 +2517,10 @@ export function EditorClient({
                 value={selection.text.color}
                 onChange={(e) => {
                   const color = e.target.value; // native input always emits #rrggbb
+                  if (selection.text!.arc !== null) {
+                    setArcProps({ color });
+                    return;
+                  }
                   updateActiveText((t) => t.set({ fill: color }));
                 }}
               />
@@ -2225,6 +2538,10 @@ export function EditorClient({
                 const size = Number(e.target.value);
                 if (!Number.isFinite(size)) return;
                 const clamped = Math.min(Math.max(size, FONT_SIZE_MIN), FONT_SIZE_MAX);
+                if (selection.text!.arc !== null) {
+                  setArcProps({ fontSize: clamped });
+                  return;
+                }
                 updateActiveText((t) => {
                   // Reset any interactive scale so the typed size IS the size.
                   t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
@@ -2244,6 +2561,10 @@ export function EditorClient({
                 const px = Number(e.target.value);
                 if (!Number.isFinite(px)) return;
                 const clamped = Math.min(Math.max(px, LETTER_SPACING_MIN), LETTER_SPACING_MAX);
+                if (selection.text!.arc !== null) {
+                  setArcProps({ letterSpacing: clamped });
+                  return;
+                }
                 updateActiveText((t) => {
                   // Target px at the current effective size -> em-based charSpacing.
                   const effective = (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1);
@@ -2265,13 +2586,69 @@ export function EditorClient({
                       ? 'btn btn--ghost btn--small btn--active'
                       : 'btn btn--ghost btn--small'
                   }
-                  onClick={() => updateActiveText((t) => t.set({ textAlign: align }))}
+                  onClick={() =>
+                    selection.text!.arc !== null
+                      ? setArcProps({ align })
+                      : updateActiveText((t) => t.set({ textAlign: align }))
+                  }
                 >
                   {align}
                 </button>
               ))}
             </div>
           </div>
+          <div className="text-panel__field" role="group" aria-label="Text curve">
+            Curve
+            <div className="text-panel__align">
+              <button
+                type="button"
+                data-testid="text-arc-none"
+                className={
+                  selection.text.arc === null
+                    ? 'btn btn--ghost btn--small btn--active'
+                    : 'btn btn--ghost btn--small'
+                }
+                onClick={() => setArc(null)}
+              >
+                none
+              </button>
+              <button
+                type="button"
+                data-testid="text-arc-toggle"
+                className={
+                  selection.text.arc !== null
+                    ? 'btn btn--ghost btn--small btn--active'
+                    : 'btn btn--ghost btn--small'
+                }
+                disabled={selection.text.wrap}
+                title={selection.text.wrap ? 'Turn off wrap to curve text' : undefined}
+                onClick={() => setArc(selection.text!.arc ?? 90)}
+              >
+                arc
+              </button>
+            </div>
+          </div>
+          {selection.text.arc !== null && (
+            <div className="text-panel__field">
+              Bend
+              <input
+                type="range"
+                data-testid="text-arc-slider"
+                min={ARC_SWEEP_MIN}
+                max={ARC_SWEEP_MAX}
+                step={5}
+                value={selection.text.arc}
+                aria-label="Arc bend in degrees"
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  if (!Number.isFinite(value) || value === 0) return;
+                  setArc(value);
+                }}
+              />
+            </div>
+          )}
+          {selection.text.arc === null && (
+          <>
           <div className="text-panel__field" role="group" aria-label="Text direction">
             Direction
             <div className="text-panel__align">
@@ -2409,7 +2786,9 @@ export function EditorClient({
               </div>
             )}
           </div>
-          {selection.text.lineCount > TEXT_MAX_LINES && (
+          </>
+          )}
+          {selection.text.arc === null && selection.text.lineCount > TEXT_MAX_LINES && (
             <p
               className="text-panel__warning"
               role="alert"

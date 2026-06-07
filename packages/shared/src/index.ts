@@ -4,3 +4,4 @@ export * from './document';
 export * from './quality';
 export * from './fonts';
 export * from './text';
+export * from './arc';

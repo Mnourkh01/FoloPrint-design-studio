@@ -172,6 +172,73 @@ test('crop: shrinking the frame derives a smaller asset and keeps the region in 
   await expect(page.getByTestId('editor-status')).toContainText('Design saved');
 });
 
+test('pattern: tiling fill previews live, locks rotation, and survives save/reopen', async ({ page }) => {
+  await page.goto('/editor/classic-tee');
+  await page.waitForFunction(() => Boolean(window.__studioCanvas?.backgroundImage));
+  await page.setInputFiles('[data-testid=upload-input]', FIXTURE);
+  await page.waitForFunction(
+    () => (window.__studioCanvas?.getObjects() ?? []).some((o) => (o as { assetId?: string }).assetId),
+  );
+
+  // Enable a mirror pattern with spacing through the panel.
+  await page.getByTestId('context-tool-pattern').click();
+  await page.getByTestId('pattern-type-mirror').click();
+  await page.getByTestId('pattern-spacing-input').fill('12');
+
+  const state = () =>
+    page.evaluate(() => {
+      const objs = window.__studioCanvas?.getObjects() ?? [];
+      const img = objs.find((o) => (o as { assetId?: string }).assetId) as
+        | { pattern?: { type: string; spacing: number }; lockRotation?: boolean }
+        | undefined;
+      return {
+        pattern: img?.pattern ?? null,
+        lockRotation: img?.lockRotation ?? false,
+        previews: objs.filter((o) => (o as { patternPreview?: boolean }).patternPreview).length,
+      };
+    });
+
+  const on = await state();
+  expect(on.pattern).toEqual({ type: 'mirror', spacing: 12 });
+  expect(on.lockRotation).toBe(true);
+  expect(on.previews).toBe(1);
+
+  // Save, render, reopen: the pattern persists and the preview rebuilds.
+  await page.getByTestId('save-design').click();
+  await expect(page.getByTestId('editor-status')).toContainText('Design saved');
+  await page.getByTestId('generate-mockup').click();
+  await page.waitForURL(/\/designs\/[0-9a-f-]{36}/);
+  await page.getByTestId('edit-design').click();
+  await page.waitForURL(/\/editor\/classic-tee\?design=/);
+  await page.waitForFunction(
+    () =>
+      (window.__studioCanvas?.getObjects() ?? []).some(
+        (o) => (o as { patternPreview?: boolean }).patternPreview,
+      ),
+  );
+  const reopened = await state();
+  expect(reopened.pattern).toEqual({ type: 'mirror', spacing: 12 });
+  expect(reopened.previews).toBe(1);
+
+  // Turning the pattern off drops the preview and unlocks rotation.
+  await page.evaluate(() => {
+    const canvas = window.__studioCanvas as unknown as {
+      getObjects(): Array<Record<string, unknown>>;
+      setActiveObject(o: unknown): void;
+      requestRenderAll(): void;
+    };
+    const img = canvas.getObjects().find((o) => (o as { assetId?: string }).assetId);
+    canvas.setActiveObject(img);
+    canvas.requestRenderAll();
+  });
+  await page.getByTestId('context-tool-pattern').click();
+  await page.getByTestId('pattern-type-none').click();
+  const off = await state();
+  expect(off.pattern).toBeNull();
+  expect(off.lockRotation).toBe(false);
+  expect(off.previews).toBe(0);
+});
+
 test('remove background: swaps the selected image for a transparent derivative', async ({ page }) => {
   // Logo on a flat near-white box, generated fresh (the checked-in logo fixture
   // has no background to remove).

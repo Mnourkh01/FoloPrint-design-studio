@@ -25,16 +25,31 @@ import {
   LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
   OUTLINE_WIDTH_MIN,
+  PATTERN_SPACING_MAX,
+  PATTERN_SPACING_MIN,
+  PATTERN_TYPES,
   SHADOW_OFFSET_MAX,
   TEXT_ALIGNMENTS,
   TEXT_DIRECTIONS,
   TEXT_MAX_LENGTH,
   TEXT_MAX_LINES,
   TEXT_WRAP_MODES,
+  type PatternType,
   type TextAlign,
   type TextDirection,
   type TextWrapMode,
 } from '@foloprint/shared';
+
+/** v1.9 pattern tiling. Rotation-0 rule is enforced by the shared validation. */
+export class ImagePatternDto {
+  @IsIn(PATTERN_TYPES as readonly string[])
+  type!: PatternType;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(PATTERN_SPACING_MIN)
+  @Max(PATTERN_SPACING_MAX)
+  spacing!: number;
+}
 
 /** v1.8 glyph outline. Both fields required when the object is present. */
 export class TextOutlineDto {
@@ -86,6 +101,13 @@ export class DesignObjectDto {
   @ValidateIf((o: DesignObjectDto) => !isText(o))
   @IsUUID()
   assetId?: string;
+
+  /** Tiling fill (v1.9); missing means the single image. Image objects only. */
+  @ValidateIf((o: DesignObjectDto) => !isText(o))
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ImagePatternDto)
+  pattern?: ImagePatternDto;
 
   /** Object center X, template canvas px. */
   @IsNumber({ allowNaN: false, allowInfinity: false })

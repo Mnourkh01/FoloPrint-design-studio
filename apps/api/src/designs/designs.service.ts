@@ -220,7 +220,14 @@ export class DesignsService {
         ...base,
       };
     }
-    return { type: 'image', assetId: o.assetId!, ...base };
+    return {
+      type: 'image',
+      assetId: o.assetId!,
+      ...(o.pattern !== undefined
+        ? { pattern: { type: o.pattern.type, spacing: o.pattern.spacing } }
+        : {}),
+      ...base,
+    };
   }
 
   /** Asset ids referenced by image objects; text objects reference no assets. */
@@ -297,6 +304,7 @@ export class DesignsService {
         return {
           type: 'image',
           imagePath: this.storage.resolvePath(asset.storagePath),
+          ...(obj.pattern ? { pattern: obj.pattern } : {}),
           ...base,
         };
       });

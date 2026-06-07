@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
+import { Canvas, FabricImage, IText, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
   evaluateObjectQuality,
   FONT_SIZE_MAX,
@@ -14,6 +14,8 @@ import {
   LETTER_SPACING_MIN,
   OUTLINE_WIDTH_MAX,
   OUTLINE_WIDTH_MIN,
+  PATTERN_SPACING_MAX,
+  PATTERN_SPACING_MIN,
   printAreaPpi,
   resolveTextDirection,
   SHADOW_OFFSET_MAX,
@@ -22,7 +24,9 @@ import {
   type DesignObject,
   type DesignPlacement,
   type DesignProjectDto,
+  type ImagePattern,
   type OverlayBlend,
+  type PatternType,
   type PrintAreaDto,
   type PrintQualityLevel,
   type ProductTemplateDto,
@@ -216,7 +220,23 @@ const CONTEXT_TOOL_ICONS = {
       <path d="M18 22V8a2 2 0 0 0-2-2H2" />
     </svg>
   ),
+  pattern: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  ),
 };
+
+/** Pattern panel choices; null = single image. */
+const PATTERN_CHOICES: { key: PatternType | null; label: string }[] = [
+  { key: null, label: 'None' },
+  { key: 'grid', label: 'Grid' },
+  { key: 'mirror', label: 'Mirror' },
+  { key: 'half-drop', label: 'Half-drop' },
+];
 
 /**
  * Polished selection chrome shared by every design object: branded border,
@@ -281,6 +301,15 @@ type DesignedObject = FabricObject & {
   fontKey?: string;
   /** Contract direction value ('auto' | 'ltr' | 'rtl'); Fabric's own `direction` holds the resolved one. */
   textDirection?: TextDirection;
+  /** v1.9 tiling fill (image objects); the preview rect is rebuilt from this. */
+  pattern?: ImagePattern;
+};
+
+/** Non-interactive area-sized rect carrying the live pattern preview for one image. */
+type PatternPreviewRect = Rect & {
+  patternPreview?: true;
+  patternFor?: DesignedObject;
+  printAreaKey?: string;
 };
 
 /** IText for plain text, Textbox when wrap-in-box is on (same prop surface). */
@@ -307,6 +336,8 @@ interface SelectionReadout {
   quality: { effectiveDpi: number; level: PrintQualityLevel } | null;
   /** Physical print size in inches (image only); null when the area has no usable ppi. */
   physical: { widthIn: number; heightIn: number } | null;
+  /** v1.9 tiling fill (image only); null = single image. */
+  pattern: ImagePattern | null;
   /** Text styling, present when kind === 'text'. */
   text: {
     fontKey: string;
@@ -396,7 +427,7 @@ export function EditorClient({
   const [viewZoom, setViewZoom] = useState(1);
 
   /** Open contextual object tool (toolbar above the stage); null = toolbar only. */
-  const [objectTool, setObjectTool] = useState<'transform' | 'position' | null>(null);
+  const [objectTool, setObjectTool] = useState<'transform' | 'position' | 'pattern' | null>(null);
 
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
@@ -464,6 +495,127 @@ export function EditorClient({
       template.printAreas.find((a) => a.key === (obj.printAreaKey ?? activeAreaKeyRef.current)),
     [template.printAreas],
   );
+
+  // ---- pattern preview (v1.9): a non-interactive area-sized rect under the tile,
+  // filled with a meta-tile canvas Pattern so the repeat is visible live.
+
+  /** Draws the meta-tile (1x1 grid, 2x2 mirror, 2-col half-drop) for a patterned image. */
+  const buildMetaTile = useCallback((obj: DesignedObject & FabricImage): HTMLCanvasElement | null => {
+    const el = obj.getElement() as HTMLImageElement | HTMLCanvasElement | undefined;
+    const pattern = obj.pattern;
+    if (!el || !pattern) return null;
+    const tileW = Math.max(1, Math.round(obj.getScaledWidth()));
+    const tileH = Math.max(1, Math.round(obj.getScaledHeight()));
+    const spacing = Math.round(pattern.spacing);
+    const stepX = tileW + spacing;
+    const stepY = tileH + spacing;
+
+    const meta = document.createElement('canvas');
+    meta.width = pattern.type === 'grid' ? stepX : 2 * stepX;
+    meta.height = pattern.type === 'mirror' ? 2 * stepY : stepY;
+    const ctx = meta.getContext('2d');
+    if (!ctx) return null;
+
+    const draw = (x: number, y: number, flipX: boolean, flipY: boolean) => {
+      ctx.save();
+      ctx.translate(x + (flipX ? tileW : 0), y + (flipY ? tileH : 0));
+      ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      ctx.drawImage(el, 0, 0, tileW, tileH);
+      ctx.restore();
+    };
+    if (pattern.type === 'grid') {
+      draw(0, 0, false, false);
+    } else if (pattern.type === 'mirror') {
+      draw(0, 0, false, false);
+      draw(stepX, 0, true, false);
+      draw(0, stepY, false, true);
+      draw(stepX, stepY, true, true);
+    } else {
+      // half-drop: second column shifted half a step, drawn twice so it wraps.
+      draw(0, 0, false, false);
+      draw(stepX, Math.round(stepY / 2), false, false);
+      draw(stepX, Math.round(stepY / 2) - stepY, false, false);
+    }
+    return meta;
+  }, []);
+
+  /** Cheap per-drag update: re-phases the existing preview fill to the tile position. */
+  const updatePatternOffset = useCallback(
+    (obj: DesignedObject) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const preview = canvas
+        .getObjects()
+        .find((o) => (o as PatternPreviewRect).patternFor === obj) as PatternPreviewRect | undefined;
+      const area = areaOf(obj);
+      const fill = preview?.fill;
+      if (!preview || !area || !(fill instanceof Pattern)) return;
+      const source = fill.source as HTMLCanvasElement;
+      const mod = (a: number, n: number) => ((a % n) + n) % n;
+      fill.offsetX = mod((obj.left ?? 0) - obj.getScaledWidth() / 2 - area.x, source.width);
+      fill.offsetY = mod((obj.top ?? 0) - obj.getScaledHeight() / 2 - area.y, source.height);
+      preview.dirty = true;
+      canvas.requestRenderAll();
+    },
+    [areaOf],
+  );
+
+  /** Removes the preview rect belonging to the given image, if any. */
+  const removePatternPreviewFor = useCallback((obj: DesignedObject) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    for (const o of [...canvas.getObjects()]) {
+      if ((o as PatternPreviewRect).patternFor === obj) canvas.remove(o);
+    }
+  }, []);
+
+  /** Full rebuild: new meta-tile (size/spacing/type changes) + fresh preview rect. */
+  const refreshPatternPreview = useCallback(
+    (obj: DesignedObject) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      removePatternPreviewFor(obj);
+      if (obj.kind !== 'image' || !obj.pattern) {
+        canvas.requestRenderAll();
+        return;
+      }
+      const area = areaOf(obj);
+      const meta = buildMetaTile(obj as DesignedObject & FabricImage);
+      if (!area || !meta) return;
+      const rect = new Rect({
+        left: area.x,
+        top: area.y,
+        originX: 'left',
+        originY: 'top',
+        width: area.width,
+        height: area.height,
+        fill: new Pattern({ source: meta, repeat: 'repeat' }),
+        selectable: false,
+        evented: false,
+        visible: obj.visible,
+      }) as PatternPreviewRect;
+      rect.patternPreview = true;
+      rect.patternFor = obj;
+      rect.printAreaKey = obj.printAreaKey;
+      canvas.add(rect);
+      canvas.sendObjectToBack(rect);
+      updatePatternOffset(obj);
+      canvas.requestRenderAll();
+    },
+    [areaOf, buildMetaTile, removePatternPreviewFor, updatePatternOffset],
+  );
+
+  /** Late-bound mirrors for the canvas handlers registered once at init. */
+  const patternHooksRef = useRef({
+    refresh: (_obj: DesignedObject) => {},
+    offset: (_obj: DesignedObject) => {},
+    remove: (_obj: DesignedObject) => {},
+  });
+  patternHooksRef.current = {
+    refresh: refreshPatternPreview,
+    offset: updatePatternOffset,
+    remove: removePatternPreviewFor,
+  };
 
   /** Keep the object's bounding box inside ITS OWN print area by translating it. */
   const clampToPrintArea = useCallback(
@@ -596,6 +748,7 @@ export function EditorClient({
           ? { effectiveDpi: Math.round(quality.effectiveDpi), level: quality.level }
           : null,
         physical,
+        pattern: designed.kind === 'image' ? (designed.pattern ?? null) : null,
         text,
       });
     },
@@ -606,6 +759,7 @@ export function EditorClient({
     const canvas = canvasRef.current;
     const active = canvas?.getActiveObject() as DesignedObject | undefined;
     if (canvas && active?.kind) {
+      patternHooksRef.current.remove(active);
       canvas.remove(active);
       canvas.discardActiveObject();
       canvas.requestRenderAll();
@@ -752,7 +906,13 @@ export function EditorClient({
           designed.kind = 'image';
           designed.assetId = saved.assetId;
           designed.printAreaKey = areaKey;
+          if (saved.pattern) {
+            designed.pattern = saved.pattern;
+            designed.set({ lockRotation: true });
+            designed.setControlsVisibility({ mtr: false });
+          }
           canvas.add(img);
+          if (saved.pattern) patternHooksRef.current.refresh(designed);
           canvas.requestRenderAll();
           refreshAreaCounts();
         })
@@ -919,6 +1079,10 @@ export function EditorClient({
         return;
       }
       clampToPrintArea(e.target as DesignedObject);
+      // Dragging a patterned tile re-phases its preview fill (cheap path).
+      if ((e.target as DesignedObject).pattern) {
+        patternHooksRef.current.offset(e.target as DesignedObject);
+      }
     };
     const onModified = (e: { target?: FabricObject }) => {
       if (e.target && (e.target as { cropTag?: boolean }).cropTag) {
@@ -929,6 +1093,10 @@ export function EditorClient({
       if (e.target) {
         clampTextScale(e.target as DesignedObject);
         fitToPrintArea(e.target as DesignedObject);
+        // Scaling changes the tile size: rebuild the preview's meta-tile.
+        if ((e.target as DesignedObject).pattern) {
+          patternHooksRef.current.refresh(e.target as DesignedObject);
+        }
         canvas.requestRenderAll();
         readSelection(e.target);
       }
@@ -1069,6 +1237,11 @@ export function EditorClient({
       const mine = obj.printAreaKey === area.key;
       obj.set({ visible: mine, evented: mine, selectable: mine });
     }
+    // Pattern previews follow their area like the objects they belong to.
+    for (const o of canvas.getObjects()) {
+      const preview = o as PatternPreviewRect;
+      if (preview.patternPreview) preview.set({ visible: preview.printAreaKey === area.key });
+    }
     canvas.discardActiveObject();
     setSelection(null);
     canvas.requestRenderAll();
@@ -1194,8 +1367,15 @@ export function EditorClient({
       img.kind = 'image';
       img.assetId = derived.id;
       img.printAreaKey = active.printAreaKey;
+      if (active.pattern) {
+        img.pattern = active.pattern;
+        img.set({ lockRotation: true });
+        img.setControlsVisibility({ mtr: false });
+      }
+      patternHooksRef.current.remove(active);
       canvas.remove(active);
       canvas.add(img);
+      if (img.pattern) patternHooksRef.current.refresh(img);
       canvas.setActiveObject(img);
       canvas.requestRenderAll();
       readSelection(img);
@@ -1381,14 +1561,21 @@ export function EditorClient({
       newImg.kind = 'image';
       newImg.assetId = derived.id;
       newImg.printAreaKey = img.printAreaKey;
+      if (img.pattern) {
+        newImg.pattern = img.pattern;
+        newImg.set({ lockRotation: true });
+        newImg.setControlsVisibility({ mtr: false });
+      }
 
       const cropRect = cropRectRef.current;
       cropRectRef.current = null;
       cropImageRef.current = null;
       setCropping(false);
       if (cropRect) canvas.remove(cropRect);
+      patternHooksRef.current.remove(img);
       canvas.remove(img);
       canvas.add(newImg);
+      if (newImg.pattern) patternHooksRef.current.refresh(newImg);
       canvas.setActiveObject(newImg);
       canvas.requestRenderAll();
       readSelection(newImg);
@@ -1511,6 +1698,35 @@ export function EditorClient({
         obj.set({ left: (obj.left ?? 0) + dx, top: (obj.top ?? 0) + dy });
       }),
     [updateActiveObject, areaOf],
+  );
+
+  /**
+   * Enables/disables the tiling fill on the selected image (v1.9). Patterned tiles
+   * are axis-aligned: rotation resets to 0 and the rotate handle is hidden; the
+   * server rejects rotated patterns.
+   */
+  const setImagePattern = useCallback(
+    (pattern: ImagePattern | null) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'image') return;
+      if (pattern) {
+        active.pattern = pattern;
+        active.set({ angle: 0, lockRotation: true });
+        active.setControlsVisibility({ mtr: false });
+      } else {
+        delete active.pattern;
+        active.set({ lockRotation: false });
+        active.setControlsVisibility({ mtr: true });
+      }
+      active.setCoords();
+      fitToPrintArea(active);
+      refreshPatternPreview(active);
+      canvas.requestRenderAll();
+      readSelection(active);
+      markMutated();
+    },
+    [fitToPrintArea, refreshPatternPreview, readSelection, markMutated],
   );
 
   /** Sets the contract direction and re-resolves Fabric's rendered direction. */
@@ -1658,6 +1874,7 @@ export function EditorClient({
         serialized = {
           type: 'image',
           assetId: obj.assetId,
+          ...(obj.pattern ? { pattern: obj.pattern } : {}),
           x: obj.left ?? 0,
           y: obj.top ?? 0,
           width: obj.getScaledWidth(),
@@ -1708,6 +1925,10 @@ export function EditorClient({
         const placements = JSON.parse(snapshot) as DesignPlacement[];
         canvas.discardActiveObject();
         for (const obj of designedObjects()) canvas.remove(obj);
+        // Pattern previews belong to the removed objects; drop them all.
+        for (const o of [...canvas.getObjects()]) {
+          if ((o as PatternPreviewRect).patternPreview) canvas.remove(o);
+        }
         setSelection(null);
         const pending: Promise<void>[] = [];
         for (const placement of placements) {
@@ -2506,7 +2727,10 @@ export function EditorClient({
               aria-label="Object tools"
               data-testid="context-toolbar"
             >
-              {(['transform', 'position'] as const).map((key) => (
+              {(selection.kind === 'image'
+                ? (['transform', 'position', 'pattern'] as const)
+                : (['transform', 'position'] as const)
+              ).map((key) => (
                 <button
                   key={key}
                   type="button"
@@ -2520,7 +2744,9 @@ export function EditorClient({
                   onClick={() => setObjectTool((open) => (open === key ? null : key))}
                 >
                   {CONTEXT_TOOL_ICONS[key]}
-                  <span>{key === 'transform' ? 'Transform' : 'Position'}</span>
+                  <span>
+                    {key === 'transform' ? 'Transform' : key === 'position' ? 'Position' : 'Pattern'}
+                  </span>
                 </button>
               ))}
               {selection.kind === 'image' && (
@@ -2553,7 +2779,12 @@ export function EditorClient({
           {selection && objectTool === 'transform' && (
             <div className="studio__object-panel" data-testid="object-panel-transform">
               <p className="studio__object-panel-title">Rotate</p>
-              <div className="studio__rotate-row">
+              {selection.pattern && (
+                <p style={{ margin: '0 0 8px', fontSize: 12.5 }}>
+                  Patterned tiles are axis-aligned; turn the pattern off to rotate.
+                </p>
+              )}
+              <div className="studio__rotate-row" style={selection.pattern ? { display: 'none' } : undefined}>
                 <input
                   type="range"
                   min={0}
@@ -2577,6 +2808,71 @@ export function EditorClient({
                   }}
                 />
               </div>
+            </div>
+          )}
+
+          {selection && objectTool === 'pattern' && (
+            <div className="studio__object-panel" data-testid="object-panel-pattern">
+              <p className="studio__object-panel-title">Pattern</p>
+              <div className="studio__align-row" role="group" aria-label="Pattern type">
+                {PATTERN_CHOICES.map((choice) => (
+                  <button
+                    key={choice.label}
+                    type="button"
+                    className={
+                      (selection.pattern?.type ?? null) === choice.key
+                        ? 'studio__context-tool studio__context-tool--active'
+                        : 'studio__context-tool'
+                    }
+                    data-testid={`pattern-type-${choice.key ?? 'none'}`}
+                    onClick={() =>
+                      setImagePattern(
+                        choice.key
+                          ? { type: choice.key, spacing: selection.pattern?.spacing ?? 0 }
+                          : null,
+                      )
+                    }
+                  >
+                    <span>{choice.label}</span>
+                  </button>
+                ))}
+              </div>
+              {selection.pattern && (
+                <div className="studio__rotate-row" style={{ marginTop: 10 }}>
+                  <span style={{ fontSize: 12.5 }}>Spacing</span>
+                  <input
+                    type="range"
+                    min={PATTERN_SPACING_MIN}
+                    max={PATTERN_SPACING_MAX}
+                    step={1}
+                    value={Math.round(selection.pattern.spacing)}
+                    data-testid="pattern-spacing-slider"
+                    aria-label="Pattern spacing"
+                    onChange={(e) => {
+                      const spacing = Number(e.target.value);
+                      if (!Number.isFinite(spacing) || !selection.pattern) return;
+                      setImagePattern({ type: selection.pattern.type, spacing });
+                    }}
+                  />
+                  <input
+                    type="number"
+                    min={PATTERN_SPACING_MIN}
+                    max={PATTERN_SPACING_MAX}
+                    value={Math.round(selection.pattern.spacing)}
+                    data-testid="pattern-spacing-input"
+                    aria-label="Pattern spacing"
+                    onChange={(e) => {
+                      const spacing = Number(e.target.value);
+                      if (!Number.isFinite(spacing) || !selection.pattern) return;
+                      const clamped = Math.min(
+                        Math.max(spacing, PATTERN_SPACING_MIN),
+                        PATTERN_SPACING_MAX,
+                      );
+                      setImagePattern({ type: selection.pattern.type, spacing: clamped });
+                    }}
+                  />
+                </div>
+              )}
             </div>
           )}
 

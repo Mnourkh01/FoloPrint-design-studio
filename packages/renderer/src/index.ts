@@ -7,7 +7,11 @@ import {
   OUTLINE_WIDTH_MAX,
   OUTLINE_WIDTH_MIN,
   OVERLAY_BLENDS,
+  PATTERN_SPACING_MAX,
+  PATTERN_SPACING_MIN,
+  PATTERN_TYPES,
   SHADOW_OFFSET_MAX,
+  type ImagePattern,
   type OverlayBlend,
   type Rect,
   type TextAlign,
@@ -61,6 +65,11 @@ export interface RenderImageObject extends RenderObjectGeometry {
   type: 'image';
   /** Absolute path to the (already validated) asset image on disk. */
   imagePath: string;
+  /**
+   * Tiling fill (v1.9): the object's box becomes the base tile and copies fill
+   * the WHOLE print area (clipped to it). Rotation must be 0.
+   */
+  pattern?: ImagePattern;
 }
 
 export interface RenderTextObject extends RenderObjectGeometry {
@@ -206,6 +215,86 @@ async function prepareImageLayer(obj: RenderImageObject): Promise<PreparedLayer>
 }
 
 /**
+ * Tiles the object's box across the print area (v1.9). The user's tile placement
+ * sets the pattern phase; the fill is built on a margin-padded sheet (sharp
+ * composite rejects negative offsets) and then clipped to exactly the area rect.
+ */
+async function preparePatternLayer(
+  obj: RenderImageObject,
+  printArea: Rect,
+): Promise<PreparedLayer> {
+  const pattern = obj.pattern!;
+  const tileW = Math.max(1, Math.round(obj.width));
+  const tileH = Math.max(1, Math.round(obj.height));
+  const spacing = Math.round(pattern.spacing);
+  const stepX = tileW + spacing;
+  const stepY = tileH + spacing;
+
+  const base = await sharp(obj.imagePath, { limitInputPixels: MAX_INPUT_PIXELS })
+    .resize(tileW, tileH, { fit: 'fill' })
+    .ensureAlpha()
+    .png()
+    .toBuffer();
+  // Mirror variants are built once and reused across the grid.
+  const flop = pattern.type === 'mirror' ? await sharp(base).flop().png().toBuffer() : base;
+  const flip = pattern.type === 'mirror' ? await sharp(base).flip().png().toBuffer() : base;
+  const flopFlip = pattern.type === 'mirror' ? await sharp(flop).flip().png().toBuffer() : base;
+
+  const areaW = Math.round(printArea.width);
+  const areaH = Math.round(printArea.height);
+  // Margin so every composite offset is non-negative even for tiles that
+  // straddle the area edge (incl. the half-drop shift).
+  const margin = stepX + stepY;
+
+  // Base tile's top-left in area-local coords = the pattern phase.
+  const originX = Math.round(obj.x - obj.width / 2 - printArea.x);
+  const originY = Math.round(obj.y - obj.height / 2 - printArea.y);
+
+  const colMin = Math.floor((-tileW - originX) / stepX) - 1;
+  const colMax = Math.ceil((areaW - originX) / stepX) + 1;
+  const rowMin = Math.floor((-tileH - originY) / stepY) - 1;
+  const rowMax = Math.ceil((areaH - originY) / stepY) + 1;
+
+  const even = (n: number) => ((n % 2) + 2) % 2 === 0;
+  const layers: sharp.OverlayOptions[] = [];
+  for (let col = colMin; col <= colMax; col++) {
+    for (let row = rowMin; row <= rowMax; row++) {
+      const x = originX + col * stepX;
+      let y = originY + row * stepY;
+      let input = base;
+      if (pattern.type === 'mirror') {
+        input = even(col) ? (even(row) ? base : flip) : even(row) ? flop : flopFlip;
+      } else if (pattern.type === 'half-drop' && !even(col)) {
+        y += Math.round(stepY / 2);
+      }
+      if (x + tileW <= -margin || y + tileH <= -margin || x >= areaW + margin || y >= areaH + margin) {
+        continue;
+      }
+      layers.push({ input, left: x + margin, top: y + margin });
+    }
+  }
+
+  const sheet = await sharp({
+    create: {
+      width: areaW + 2 * margin,
+      height: areaH + 2 * margin,
+      channels: 4,
+      background: TRANSPARENT,
+    },
+  })
+    .composite(layers)
+    .png()
+    .toBuffer();
+
+  const clipped = await sharp(sheet)
+    .extract({ left: margin, top: margin, width: areaW, height: areaH })
+    .png()
+    .toBuffer();
+
+  return { input: clipped, left: Math.round(printArea.x), top: Math.round(printArea.y) };
+}
+
+/**
  * Silhouette tint: the source's alpha over a flat color (dest-in). Keeps
  * antialiasing and never touches markup; shared by the text fill, the outline
  * ring, and the shadow.
@@ -342,6 +431,19 @@ function assertRenderableObject(obj: RenderObject, index: number, printArea: Rec
   if (!isObjectInsideRect(obj, printArea)) {
     throw new RenderValidationError(`Design object ${index} is outside the print area`);
   }
+  if (obj.type !== 'text' && obj.pattern) {
+    if (
+      !PATTERN_TYPES.includes(obj.pattern.type) ||
+      !Number.isFinite(obj.pattern.spacing) ||
+      obj.pattern.spacing < PATTERN_SPACING_MIN ||
+      obj.pattern.spacing > PATTERN_SPACING_MAX
+    ) {
+      throw new RenderValidationError(`Design object ${index} has an invalid pattern`);
+    }
+    if (obj.rotation % 360 !== 0) {
+      throw new RenderValidationError(`Design object ${index} is patterned and must not be rotated`);
+    }
+  }
   if (obj.type === 'text') {
     if (
       !Array.isArray(obj.lines) ||
@@ -435,7 +537,12 @@ export async function renderMockup(options: RenderMockupOptions): Promise<Buffer
   const designLayers: sharp.OverlayOptions[] = [];
 
   for (const obj of objects) {
-    const prepared = obj.type === 'text' ? await prepareTextLayer(obj) : await prepareImageLayer(obj);
+    const prepared =
+      obj.type === 'text'
+        ? await prepareTextLayer(obj)
+        : obj.pattern
+          ? await preparePatternLayer(obj, printArea)
+          : await prepareImageLayer(obj);
     designLayers.push({ input: prepared.input, left: prepared.left, top: prepared.top });
   }
 

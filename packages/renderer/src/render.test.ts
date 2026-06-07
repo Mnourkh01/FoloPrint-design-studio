@@ -240,6 +240,125 @@ describe('renderMockup mask and overlay blend (photo templates)', () => {
   });
 });
 
+describe('renderMockup pattern tiling (v1.9)', () => {
+  const patternObject = (pattern: { type: 'grid' | 'mirror' | 'half-drop'; spacing: number }) => ({
+    type: 'image' as const,
+    imagePath: logoPath, // 120x120 solid red source
+    x: 200,
+    y: 200,
+    width: 50,
+    height: 50,
+    rotation: 0,
+    pattern,
+  });
+
+  const render = (pattern: { type: 'grid' | 'mirror' | 'half-drop'; spacing: number }) =>
+    renderMockup({
+      baseImagePath: basePath,
+      canvasWidth: 400,
+      canvasHeight: 400,
+      printArea,
+      objects: [patternObject(pattern)],
+    });
+
+  const probe = async (png: Buffer, left: number, top: number) =>
+    (
+      await sharp(png).extract({ left, top, width: 1, height: 1 }).raw().toBuffer({ resolveWithObject: true })
+    ).data;
+
+  it('fills the whole print area from a small centered tile and clips at the edges', async () => {
+    const png = await render({ type: 'grid', spacing: 0 });
+
+    // Far corners INSIDE the area (100..300 square) carry the red tile fill.
+    for (const [x, y] of [[105, 105], [295, 295], [105, 295], [295, 105]] as const) {
+      const px = await probe(png, x, y);
+      expect(px[0]).toBeGreaterThan(150);
+      expect(px[1]).toBeLessThan(120);
+    }
+
+    // Just OUTSIDE the area: plain gray base, the fill is clipped.
+    const outside = await probe(png, 95, 200);
+    expect(outside[0]).toBeGreaterThan(200);
+    expect(outside[1]).toBeGreaterThan(200);
+  });
+
+  it('spacing leaves base-colored gaps between tiles', async () => {
+    const png = await render({ type: 'grid', spacing: 30 });
+    // The base tile spans 175..225; the gap band right of it (225..255) shows the base.
+    const gap = await probe(png, 240, 200);
+    expect(gap[0]).toBeGreaterThan(200);
+    expect(gap[1]).toBeGreaterThan(200);
+  });
+
+  it('mirror and half-drop lay out differently from grid', async () => {
+    // The solid-color source tiles identically under every type, so give the type
+    // comparison an asymmetric two-band tile instead.
+    const bandPath = join(dir, 'band.png');
+    await writeFile(
+      bandPath,
+      await sharp({
+        create: { width: 60, height: 60, channels: 4, background: { r: 200, g: 30, b: 30, alpha: 1 } },
+      })
+        .composite([
+          {
+            input: { create: { width: 30, height: 60, channels: 4, background: { r: 30, g: 30, b: 200, alpha: 1 } } },
+            left: 0,
+            top: 0,
+          },
+        ])
+        .png()
+        .toBuffer(),
+    );
+    const renderBand = (type: 'grid' | 'mirror' | 'half-drop') =>
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [{ ...patternObject({ type, spacing: 10 }), imagePath: bandPath }],
+      });
+
+    const [grid, mirror, halfDrop] = await Promise.all([
+      renderBand('grid'),
+      renderBand('mirror'),
+      renderBand('half-drop'),
+    ]);
+    expect(grid.equals(mirror)).toBe(false);
+    expect(grid.equals(halfDrop)).toBe(false);
+    expect(mirror.equals(halfDrop)).toBe(false);
+  });
+
+  it('rejects rotated patterns and invalid pattern values', async () => {
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [{ ...patternObject({ type: 'grid', spacing: 0 }), rotation: 20 }],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [patternObject({ type: 'swirl' as never, spacing: 0 })],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+    await expect(
+      renderMockup({
+        baseImagePath: basePath,
+        canvasWidth: 400,
+        canvasHeight: 400,
+        printArea,
+        objects: [patternObject({ type: 'grid', spacing: 999 })],
+      }),
+    ).rejects.toThrow(RenderValidationError);
+  });
+});
+
 describe('renderMockup per print area (multi-area designs)', () => {
   // The API renders one mockup per placement: each call gets that area's own base
   // (front photo vs back photo) and that area's rect. These tests prove the renderer

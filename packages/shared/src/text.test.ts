@@ -272,6 +272,43 @@ describe('designObjectContentErrors for image objects', () => {
     );
   });
 
+  it('accepts a valid pattern and rejects bad types, spacing, and rotation', () => {
+    const patterned = (pattern: unknown, rotation = 0): StoredDesignObject =>
+      ({
+        type: 'image',
+        assetId: 'a',
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 10,
+        rotation,
+        pattern,
+      }) as unknown as StoredDesignObject;
+
+    expect(designObjectContentErrors(patterned({ type: 'grid', spacing: 0 }))).toEqual([]);
+    expect(designObjectContentErrors(patterned({ type: 'mirror', spacing: 100 }))).toEqual([]);
+    expect(designObjectContentErrors(patterned({ type: 'half-drop', spacing: 12 }))).toEqual([]);
+
+    expect(designObjectContentErrors(patterned({ type: 'spiral', spacing: 0 }))).toContainEqual(
+      expect.stringMatching(/Pattern type/),
+    );
+    expect(designObjectContentErrors(patterned({ type: 'grid', spacing: 101 }))).toContainEqual(
+      expect.stringMatching(/Pattern spacing/),
+    );
+    expect(designObjectContentErrors(patterned({ type: 'grid', spacing: 0 }, 15))).toContainEqual(
+      expect.stringMatching(/must not be rotated/),
+    );
+    expect(designObjectContentErrors(patterned('tiled'))).toContainEqual(
+      expect.stringMatching(/Pattern must be an object/),
+    );
+  });
+
+  it('rejects a pattern on a text object', () => {
+    expect(errorsOf({ pattern: { type: 'grid', spacing: 0 } } as never)).toContainEqual(
+      expect.stringMatching(/must not carry a pattern/),
+    );
+  });
+
   it('rejects an image object carrying v1.8 text effect fields', () => {
     const sneaky = {
       type: 'image',

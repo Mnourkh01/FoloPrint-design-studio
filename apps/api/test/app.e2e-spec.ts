@@ -475,6 +475,63 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('image pattern tiling (v1.9)', () => {
+    const postFront = (objects: object[]) =>
+      http()
+        .post('/designs')
+        .send({ templateId: template.id, placements: [{ printAreaKey: 'front', objects }] });
+
+    it('saves, renders, and reopens a patterned image', async () => {
+      const asset = await uploadPng();
+      const res = await postFront([
+        { ...objectIn(area('front'), asset.id), pattern: { type: 'mirror', spacing: 8 } },
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({
+        pattern: { type: 'mirror', spacing: 8 },
+      });
+
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      await http().get(`/designs/${dto.id}/preview/front`).expect(200);
+
+      const reopened = await http().get(`/designs/${dto.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        pattern: { type: 'mirror', spacing: 8 },
+      });
+    });
+
+    it('rejects unknown types, out-of-range spacing, rotated tiles, and patterns on text', async () => {
+      const asset = await uploadPng();
+      await postFront([
+        { ...objectIn(area('front'), asset.id), pattern: { type: 'swirl', spacing: 0 } },
+      ]).expect(400);
+      await postFront([
+        { ...objectIn(area('front'), asset.id), pattern: { type: 'grid', spacing: 101 } },
+      ]).expect(400);
+      const rotated = await postFront([
+        { ...objectIn(area('front'), asset.id, { rotation: 15 }), pattern: { type: 'grid', spacing: 0 } },
+      ]).expect(400);
+      expect(JSON.stringify(rotated.body)).toMatch(/must not be rotated/i);
+      const onText = await postFront([
+        {
+          type: 'text',
+          text: 'No tiling',
+          fontFamily: 'inter',
+          fontSize: 48,
+          color: '#cc0033',
+          align: 'center',
+          x: area('front').x + area('front').width / 2,
+          y: area('front').y + area('front').height / 2,
+          width: 180,
+          height: 60,
+          rotation: 0,
+          pattern: { type: 'grid', spacing: 0 },
+        },
+      ]).expect(400);
+      expect(JSON.stringify(onText.body)).toMatch(/must not carry a pattern/i);
+    });
+  });
+
   describe('stored v1 documents (legacy designs)', () => {
     /** Simulates a design saved by v1.1: raw v1 document inserted directly. */
     const insertV1Design = async (assetId: string): Promise<string> => {

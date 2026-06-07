@@ -1,5 +1,8 @@
 import { isFontFamilyKey } from './fonts';
+import { PATTERN_TYPES } from './types';
 import type {
+  ImagePattern,
+  PatternType,
   StoredDesignObject,
   TextAlign,
   TextDirection,
@@ -33,6 +36,9 @@ export const SHADOW_OFFSET_MAX = 25;
 /** Letter spacing bounds, canvas px between glyphs (v1.8). */
 export const LETTER_SPACING_MIN = -20;
 export const LETTER_SPACING_MAX = 100;
+/** Pattern tile gap bounds, canvas px (v1.9). */
+export const PATTERN_SPACING_MIN = 0;
+export const PATTERN_SPACING_MAX = 100;
 
 /**
  * Control characters are rejected except `\n` (explicit line breaks).
@@ -106,6 +112,7 @@ function imageObjectContentErrors(
   if (typeof obj.assetId !== 'string' || obj.assetId.length === 0) {
     errors.push('Image object must reference an asset');
   }
+  errors.push(...patternErrors((obj as { pattern?: ImagePattern }).pattern, obj.rotation));
   // Compare against undefined, not `in`: class instances (DTOs) may carry every
   // declared field as an own undefined property (useDefineForClassFields).
   const carried = obj as Record<string, unknown>;
@@ -125,11 +132,40 @@ function imageObjectContentErrors(
   return errors;
 }
 
+/** v1.9 pattern rules: known type, bounded spacing, axis-aligned tile only. */
+function patternErrors(pattern: ImagePattern | undefined, rotation: unknown): string[] {
+  if (pattern === undefined) return [];
+  if (typeof pattern !== 'object' || pattern === null) {
+    return ['Pattern must be an object with type and spacing'];
+  }
+  const errors: string[] = [];
+  if (!PATTERN_TYPES.includes(pattern.type as PatternType)) {
+    errors.push(`Pattern type must be one of ${PATTERN_TYPES.join(', ')}`);
+  }
+  if (
+    !isFiniteNumber(pattern.spacing) ||
+    pattern.spacing < PATTERN_SPACING_MIN ||
+    pattern.spacing > PATTERN_SPACING_MAX
+  ) {
+    errors.push(
+      `Pattern spacing must be between ${PATTERN_SPACING_MIN} and ${PATTERN_SPACING_MAX}`,
+    );
+  }
+  if (isFiniteNumber(rotation) && rotation % 360 !== 0) {
+    errors.push('Patterned images must not be rotated');
+  }
+  return errors;
+}
+
 function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text' }>): string[] {
   const errors: string[] = [];
 
   if ((obj as unknown as Record<string, unknown>).assetId !== undefined) {
     errors.push('Text object must not carry an assetId');
+  }
+
+  if ((obj as unknown as Record<string, unknown>).pattern !== undefined) {
+    errors.push('Text object must not carry a pattern');
   }
 
   const wrapMode: TextWrapMode = obj.wrapMode ?? 'none';

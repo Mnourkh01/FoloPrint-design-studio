@@ -32,11 +32,29 @@ export interface DesignObjectBase {
   rotation: number;
 }
 
+/** How a patterned image tiles across its print area (v1.9). */
+export const PATTERN_TYPES = ['grid', 'mirror', 'half-drop'] as const;
+export type PatternType = (typeof PATTERN_TYPES)[number];
+
+/**
+ * Pattern fill (v1.9): the object's box becomes the BASE TILE and copies fill the
+ * whole print area (clipped to it). 'grid' repeats as-is, 'mirror' alternates
+ * flips on both axes, 'half-drop' shifts odd columns by half a tile. Patterned
+ * objects must have rotation 0 (the tiling math is axis-aligned).
+ */
+export interface ImagePattern {
+  type: PatternType;
+  /** Gap between tiles in canvas px (0..100). */
+  spacing: number;
+}
+
 /** One placed artwork image inside a print area. */
 export interface ImageDesignObject extends DesignObjectBase {
   type: 'image';
   /** UploadedAsset id this object renders. */
   assetId: string;
+  /** Tiling fill (v1.9); absent = the single image. */
+  pattern?: ImagePattern;
 }
 
 export type TextAlign = 'left' | 'center' | 'right';

@@ -44,6 +44,12 @@ npm run test:web             # Playwright smoke (requires api + db seeded)
   the editor mirrors the blend with a canvas composite op so live view matches the server
   render. Source blanks + the derivation script live in `apps/api/prisma/assets/`; the seed
   copies them into storage.
+- Pattern tiling (v1.9): optional `pattern` ({type grid|mirror|half-drop, spacing 0..100})
+  on image objects; the object's box is the BASE TILE and the fill covers the whole print
+  area (clipped to it), phase anchored to the tile position. Patterned objects must have
+  rotation 0. Editor preview = meta-tile canvas in a Fabric Pattern fill on an area-sized
+  rect; server tiles on a margin-padded sheet (sharp rejects negative composite offsets)
+  then extracts the area rect.
 - Background removal (`POST /assets/:id/remove-background`) derives a NEW png asset by
   border flood-fill (flat backgrounds only, renderer `removeFlatBackground`); the source
   asset is immutable. Crop (`POST /assets/:id/crop`, body = source-space int rect) follows

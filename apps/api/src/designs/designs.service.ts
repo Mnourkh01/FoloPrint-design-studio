@@ -203,8 +203,9 @@ export class DesignsService {
     return {
       version: 2,
       templateId: template.id,
-      // Picked only when present so a pre-v2.0 payload persists byte-identical.
+      // Picked only when present so a pre-v2.x payload persists byte-identical.
       ...(dto.colorKey !== undefined ? { colorKey: dto.colorKey } : {}),
+      ...(dto.size !== undefined ? { size: dto.size } : {}),
       placements: dto.placements.map((placement) => ({
         printAreaKey: placement.printAreaKey,
         objects: placement.objects.map((o) => this.toDocumentObject(o)),
@@ -618,6 +619,7 @@ export class DesignsService {
       template: { id: template.id, name: template.name, slug: template.slug },
       placements,
       color: this.resolvedColorOf(template.colors, document?.colorKey),
+      size: document?.size ?? null,
       previews: this.toPreviewDtos(design.id, this.previewPathsOf(design), template.printAreas),
       worstQualityLevel,
       createdAt: design.createdAt.toISOString(),

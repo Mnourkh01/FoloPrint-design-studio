@@ -160,6 +160,14 @@ export interface StoredDesignPlacement {
 }
 
 /**
+ * Garment sizes (v2.3). A fixed catalog every garment offers; the chosen size is
+ * order-time metadata on the design and never affects the artwork, geometry, or
+ * the rendered mockup/print file (the print is identical across sizes on DTG).
+ */
+export const GARMENT_SIZES = ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL'] as const;
+export type GarmentSize = (typeof GARMENT_SIZES)[number];
+
+/**
  * The persisted design document, current version (DesignProject.designJson).
  * One document covers every print area of the template the user placed artwork on.
  */
@@ -172,6 +180,12 @@ export interface DesignDocument {
    * default color (pre-v2.0 documents persist byte-identical).
    */
   colorKey?: string;
+  /**
+   * Chosen garment size (v2.3). Order-time metadata only: it never affects the
+   * artwork or the render. Absent = no size chosen yet (pre-v2.3 documents
+   * persist byte-identical).
+   */
+  size?: GarmentSize;
   placements: DesignPlacement[];
 }
 
@@ -188,6 +202,7 @@ export interface StoredDesignDocumentV2 {
   version: 2;
   templateId: string;
   colorKey?: string;
+  size?: GarmentSize;
   placements: StoredDesignPlacement[];
 }
 
@@ -389,6 +404,8 @@ export interface DesignListItemDto {
    * colors. An unreadable document degrades to the template default.
    */
   color: DesignColorDto | null;
+  /** Chosen garment size (v2.3); null when none was picked or the doc is unreadable. */
+  size: GarmentSize | null;
   /** Same shape and ordering as DesignProjectDto.previews; empty until rendered. */
   previews: DesignPreviewDto[];
   /**

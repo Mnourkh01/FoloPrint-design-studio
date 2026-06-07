@@ -566,6 +566,40 @@ button {
   margin-bottom: 10px;
 }
 
+/* Garment size chips (v2.3) */
+.studio__sizes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.size-chip {
+  appearance: none;
+  min-width: 38px;
+  padding: 6px 10px;
+  border: 1px solid var(--studio-line);
+  border-radius: 7px;
+  background: var(--studio-panel);
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.size-chip:hover {
+  border-color: var(--studio-line-strong);
+  color: var(--ink);
+}
+
+.size-chip--active {
+  border-color: var(--ink);
+  color: var(--ink);
+  background: var(--paper-deep);
+}
+
 .swatch {
   appearance: none;
   padding: 3px;

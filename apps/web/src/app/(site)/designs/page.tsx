@@ -109,6 +109,11 @@ export default async function DesignLibraryPage({
                         {item.color.name}
                       </span>
                     )}
+                    {item.size && (
+                      <span className="chip" data-testid="design-card-size">
+                        Size {item.size}
+                      </span>
+                    )}
                     {item.placements.length > 0 ? (
                       item.placements.map((placement) => (
                         <span className="chip" key={placement.printAreaKey}>

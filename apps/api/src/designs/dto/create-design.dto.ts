@@ -22,6 +22,7 @@ import {
   FONT_KEYS,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
+  GARMENT_SIZES,
   HEX_COLOR_PATTERN,
   LETTER_SPACING_MAX,
   LETTER_SPACING_MIN,
@@ -36,6 +37,7 @@ import {
   TEXT_MAX_LENGTH,
   TEXT_MAX_LINES,
   TEXT_WRAP_MODES,
+  type GarmentSize,
   type PatternType,
   type TextAlign,
   type TextDirection,
@@ -254,6 +256,11 @@ export class CreateDesignDto {
     message: 'colorKey must be a lowercase kebab-case key',
   })
   colorKey?: string;
+
+  /** Chosen garment size (v2.3); missing means no size picked. Whitelist-checked. */
+  @IsOptional()
+  @IsIn(GARMENT_SIZES as readonly string[])
+  size?: GarmentSize;
 
   @IsArray()
   @ArrayMinSize(1)

@@ -27,8 +27,49 @@ model ProductTemplate {
 
   printAreas     PrintArea[]
   designProjects DesignProject[]
+  colors         TemplateColor[]
 
   @@map("product_templates")
+}
+
+model TemplateColor {
+  id                String  @id @default(uuid()) @db.Uuid
+  productTemplateId String  @db.Uuid
+  /// Stable key used in URLs and design documents ('white', 'black', ...).
+  key               String
+  name              String
+  /// Swatch color for the picker UI (strict #RRGGBB).
+  hex               String
+  /// Exactly one default per template (seed-enforced); designs without a colorKey use it.
+  isDefault         Boolean @default(false)
+  sortOrder         Int     @default(0)
+  active            Boolean @default(true)
+  /// Template-level (front view) blank in this color; the default color points at the
+  /// same files as ProductTemplate.baseImagePath/thumbImagePath.
+  baseImagePath     String
+  thumbImagePath    String
+
+  productTemplate ProductTemplate          @relation(fields: [productTemplateId], references: [id], onDelete: Cascade)
+  areaImages      TemplateColorAreaImage[]
+
+  @@unique([productTemplateId, key])
+  @@map("template_colors")
+}
+
+/// Color-specific view images for a print area that carries its own view (e.g. back);
+/// mirrors the PrintArea -> ProductTemplate image fallback, one level deeper.
+model TemplateColorAreaImage {
+  id              String @id @default(uuid()) @db.Uuid
+  templateColorId String @db.Uuid
+  printAreaId     String @db.Uuid
+  baseImagePath   String
+  thumbImagePath  String
+
+  templateColor TemplateColor @relation(fields: [templateColorId], references: [id], onDelete: Cascade)
+  printArea     PrintArea     @relation(fields: [printAreaId], references: [id], onDelete: Cascade)
+
+  @@unique([templateColorId, printAreaId])
+  @@map("template_color_area_images")
 }
 
 model PrintArea {
@@ -58,7 +99,8 @@ model PrintArea {
   /// Physical height in inches; null = derived from widthInches keeping canvas aspect.
   heightInches      Float?
 
-  productTemplate ProductTemplate @relation(fields: [productTemplateId], references: [id], onDelete: Cascade)
+  productTemplate ProductTemplate          @relation(fields: [productTemplateId], references: [id], onDelete: Cascade)
+  colorAreaImages TemplateColorAreaImage[]
 
   @@unique([productTemplateId, key])
   @@map("print_areas")

@@ -1,4 +1,4 @@
-import {
+﻿import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
@@ -6,7 +6,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { DesignProject, PrintArea, ProductTemplate } from '@prisma/client';
+import type {
+  DesignProject,
+  PrintArea,
+  ProductTemplate,
+  TemplateColor,
+  TemplateColorAreaImage,
+} from '@prisma/client';
 import {
   collectQualityWarnings,
   evaluateObjectQuality,
@@ -34,8 +40,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import type { CreateDesignDto, DesignObjectDto } from './dto/create-design.dto';
 
+type ColorWithAreaImages = TemplateColor & { areaImages: TemplateColorAreaImage[] };
 type DesignWithTemplate = DesignProject & {
-  productTemplate: ProductTemplate & { printAreas: PrintArea[] };
+  productTemplate: ProductTemplate & { printAreas: PrintArea[]; colors: ColorWithAreaImages[] };
 };
 
 /** Stored shape of DesignProject.previewPaths: printAreaKey -> file + render time. */
@@ -70,7 +77,7 @@ export class DesignsService {
         orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
-        include: { productTemplate: { include: { printAreas: true } } },
+        include: { productTemplate: { include: { printAreas: true, colors: { include: { areaImages: true } } } } },
       }),
       this.prisma.designProject.count(),
     ]);
@@ -117,7 +124,7 @@ export class DesignsService {
         productTemplateId: designJson.templateId,
         designJson: designJson as unknown as Prisma.InputJsonValue,
       },
-      include: { productTemplate: { include: { printAreas: true } } },
+      include: { productTemplate: { include: { printAreas: true, colors: { include: { areaImages: true } } } } },
     });
 
     return this.toDto(design);
@@ -147,7 +154,7 @@ export class DesignsService {
         designJson: designJson as unknown as Prisma.InputJsonValue,
         previewPaths: Prisma.DbNull,
       },
-      include: { productTemplate: { include: { printAreas: true } } },
+      include: { productTemplate: { include: { printAreas: true, colors: { include: { areaImages: true } } } } },
     });
 
     return this.toDto(updated);
@@ -157,10 +164,16 @@ export class DesignsService {
   private async validateAndBuildDocument(dto: CreateDesignDto): Promise<DesignDocument> {
     const template = await this.prisma.productTemplate.findFirst({
       where: { id: dto.templateId, active: true },
-      include: { printAreas: true },
+      include: { printAreas: true, colors: true },
     });
     if (!template) {
       throw new NotFoundException(`Template "${dto.templateId}" not found`);
+    }
+
+    // Color is preview-time only, but a stored key must exist on the template so
+    // render() never has to guess. Missing colorKey = default color, by contract.
+    if (dto.colorKey !== undefined && !template.colors.some((c) => c.active && c.key === dto.colorKey)) {
+      throw new BadRequestException(`Template has no color "${dto.colorKey}"`);
     }
 
     // The validator gets ALL areas with their active flag so that "inactive" and
@@ -182,6 +195,8 @@ export class DesignsService {
     return {
       version: 2,
       templateId: template.id,
+      // Picked only when present so a pre-v2.0 payload persists byte-identical.
+      ...(dto.colorKey !== undefined ? { colorKey: dto.colorKey } : {}),
       placements: dto.placements.map((placement) => ({
         printAreaKey: placement.printAreaKey,
         objects: placement.objects.map((o) => this.toDocumentObject(o)),
@@ -266,6 +281,14 @@ export class DesignsService {
     const assetById = new Map(assets.map((a) => [a.id, a]));
     const areaByKey = new Map(template.printAreas.map((a) => [a.key, a]));
 
+    // Garment color: the stored key, or the template default. A stored key that no
+    // longer exists falls back to the default (a removed color must not brick the
+    // design); templates without colors keep the plain template/area images.
+    const color =
+      (document.colorKey
+        ? template.colors.find((c) => c.active && c.key === document.colorKey)
+        : undefined) ?? template.colors.find((c) => c.active && c.isDefault);
+
     const renderedAt = new Date().toISOString();
     const nextPreviews: PreviewPathsMap = {};
 
@@ -314,7 +337,15 @@ export class DesignsService {
       // Area-specific view images with template-level fallback; the mask and the
       // overlay blend follow the same rule. The renderer validates the blend value,
       // so a bad seed/config fails loudly instead of rendering wrong.
-      const baseImagePath = area.baseImagePath ?? template.baseImagePath;
+      // The chosen color swaps the BLANK only (color's area image, else its
+      // template-level image); mask and overlay are color-independent (same photo
+      // geometry), so they keep the plain fallback chain.
+      const colorAreaImage = color?.areaImages.find((img) => img.printAreaId === area.id);
+      const baseImagePath =
+        colorAreaImage?.baseImagePath ??
+        (area.baseImagePath === null ? color?.baseImagePath : undefined) ??
+        area.baseImagePath ??
+        template.baseImagePath;
       const overlayImagePath = area.overlayImagePath ?? template.overlayImagePath;
       const maskImagePath = area.maskImagePath ?? template.maskImagePath;
       const overlayBlend = (area.overlayBlend ?? template.overlayBlend) as OverlayBlend;
@@ -368,7 +399,7 @@ export class DesignsService {
   async findEntity(id: string): Promise<DesignWithTemplate> {
     const design = await this.prisma.designProject.findUnique({
       where: { id },
-      include: { productTemplate: { include: { printAreas: true } } },
+      include: { productTemplate: { include: { printAreas: true, colors: { include: { areaImages: true } } } } },
     });
     if (!design) {
       throw new NotFoundException(`Design "${id}" not found`);

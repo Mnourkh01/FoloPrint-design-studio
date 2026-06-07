@@ -423,6 +423,17 @@ export function EditorClient({
   const activeAreaKeyRef = useRef(activeAreaKey);
   activeAreaKeyRef.current = activeAreaKey;
 
+  /**
+   * Chosen garment color (v2.0). A stored key that no longer exists falls back to
+   * the default, mirroring the server's render rule. Preview-time only: swapping
+   * colors never touches object geometry, so it lives outside the undo stack.
+   */
+  const [colorKey, setColorKey] = useState<string>(() => {
+    const stored = initialDesign?.design.colorKey;
+    if (stored && template.colors.some((c) => c.key === stored)) return stored;
+    return template.colors.find((c) => c.isDefault)?.key ?? template.colors[0]?.key ?? '';
+  });
+
   /** Bumped once the canvas exists so area-dependent effects can run. */
   const [canvasReady, setCanvasReady] = useState(false);
 
@@ -461,6 +472,34 @@ export function EditorClient({
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
     [template.printAreas, activeAreaKey],
+  );
+
+  const activeColor = useMemo(
+    () => template.colors.find((c) => c.key === colorKey),
+    [template.colors, colorKey],
+  );
+
+  /**
+   * Color-aware view image URLs for one area. Same precedence the server's render
+   * uses: the color's area-specific image, else the area's own (only when the area
+   * carries its own view), else the color's template-level blank, else the plain
+   * template image.
+   */
+  const viewImagesOf = useCallback(
+    (a: PrintAreaDto): { baseUrl: string; thumbUrl: string } => {
+      const colorArea = activeColor?.areaImages.find((img) => img.printAreaKey === a.key);
+      return {
+        baseUrl: colorArea?.imageUrl ?? a.imageUrl ?? activeColor?.imageUrl ?? template.imageUrl,
+        thumbUrl:
+          colorArea?.thumbUrl ??
+          a.thumbUrl ??
+          activeColor?.thumbUrl ??
+          template.thumbUrl ??
+          a.imageUrl ??
+          template.imageUrl,
+      };
+    },
+    [activeColor, template.imageUrl, template.thumbUrl],
   );
 
   /** Canvas px per inch per area key, for the advisory DPI readout. */
@@ -1390,10 +1429,11 @@ export function EditorClient({
     setSelection(null);
     canvas.requestRenderAll();
 
-    // View images: the area's own base/overlay, falling back to the template's.
-    const baseUrl = area.imageUrl ?? template.imageUrl;
-    const baseCacheKey = area.imageUrl ? area.key : '';
-    loadViewImage(baseCacheRef.current, baseCacheKey, baseUrl)
+    // View images: color-aware base (the chosen color's blank for this view) with
+    // the same fallback chain the server renders with; cached by URL so color and
+    // tab switches both reuse loaded images.
+    const { baseUrl } = viewImagesOf(area);
+    loadViewImage(baseCacheRef.current, baseUrl, baseUrl)
       .then((img) => {
         if (cancelled) return;
         canvas.backgroundImage = img;
@@ -1403,14 +1443,14 @@ export function EditorClient({
         if (!cancelled) setStatus({ tone: 'error', message: 'Could not load the template image.' });
       });
 
+    // Overlay (fabric shading) is color-independent: same geometry for every color.
     const overlayUrl = area.overlayUrl ?? template.overlayUrl;
     if (overlayUrl) {
-      const overlayCacheKey = area.overlayUrl ? area.key : '';
       // Blend follows the same area -> template fallback as the overlay asset. Set on
       // every activation: the cached template-level image is shared across areas
       // whose blends may differ.
       const blend = FABRIC_OVERLAY_BLEND[area.overlayBlend ?? template.overlayBlend];
-      loadViewImage(overlayCacheRef.current, overlayCacheKey, overlayUrl)
+      loadViewImage(overlayCacheRef.current, overlayUrl, overlayUrl)
         .then((img) => {
           if (cancelled) return;
           img.set({ globalCompositeOperation: blend });
@@ -1428,7 +1468,7 @@ export function EditorClient({
     return () => {
       cancelled = true;
     };
-  }, [canvasReady, activeAreaKey, template, designedObjects, loadViewImage]);
+  }, [canvasReady, activeAreaKey, template, designedObjects, loadViewImage, viewImagesOf]);
 
   const handleUpload = async (file: File) => {
     const canvas = canvasRef.current;
@@ -2279,6 +2319,13 @@ export function EditorClient({
     return notes;
   }, [designedObjects, qualityOf, areaName]);
 
+  /** Swaps the garment color; a saved design needs a re-save (and re-render) to keep it. */
+  const handleColorChange = (key: string) => {
+    if (key === colorKey) return;
+    setColorKey(key);
+    if (designId) setDirty(true);
+  };
+
   const handleSave = async () => {
     const placements = collectPlacements();
     if (placements.length === 0) {
@@ -2319,7 +2366,12 @@ export function EditorClient({
     setBusy('save');
     setStatus({ tone: 'info', message: designId ? 'Updating design...' : 'Saving design...' });
     try {
-      const payload = { templateId: template.id, placements };
+      const payload = {
+        templateId: template.id,
+        // Only sent when the template has colors; the server validates the key.
+        ...(colorKey ? { colorKey } : {}),
+        placements,
+      };
       if (designId) {
         await updateDesign(designId, payload);
         setDirty(false);
@@ -2919,7 +2971,12 @@ export function EditorClient({
               <p className="studio__panel-title">Product</p>
               <div className="studio__panel-product">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(template.thumbUrl ?? template.imageUrl)} alt={template.name} width={56} height={56} />
+                <img
+                  src={apiUrl(activeColor?.thumbUrl ?? template.thumbUrl ?? template.imageUrl)}
+                  alt={template.name}
+                  width={56}
+                  height={56}
+                />
                 <div>
                   <b>{template.name}</b>
                   <span>
@@ -2927,6 +2984,31 @@ export function EditorClient({
                   </span>
                 </div>
               </div>
+              {template.colors.length > 0 && (
+                <div className="studio__panel-section">
+                  <p className="studio__panel-title">Color</p>
+                  <div className="studio__swatches" role="radiogroup" aria-label="Garment color">
+                    {template.colors.map((c) => (
+                      <button
+                        key={c.key}
+                        type="button"
+                        role="radio"
+                        aria-checked={c.key === colorKey}
+                        aria-label={c.name}
+                        title={c.name}
+                        className={c.key === colorKey ? 'swatch swatch--active' : 'swatch'}
+                        data-testid={`color-swatch-${c.key}`}
+                        onClick={() => handleColorChange(c.key)}
+                      >
+                        <span className="swatch__chip" style={{ background: c.hex }} />
+                      </button>
+                    ))}
+                  </div>
+                  <p className="studio__panel-copy" data-testid="active-color-name">
+                    {activeColor?.name ?? ''}
+                  </p>
+                </div>
+              )}
               <div className="studio__panel-section">
                 <p className="studio__panel-title">Print sides</p>
                 <ul className="studio__area-list">
@@ -3350,7 +3432,7 @@ export function EditorClient({
             >
               <span className="area-tab__thumb">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={apiUrl(a.thumbUrl ?? template.thumbUrl ?? a.imageUrl ?? template.imageUrl)} alt="" width={46} height={46} />
+                <img src={apiUrl(viewImagesOf(a).thumbUrl)} alt="" width={46} height={46} />
               </span>
               {a.name}
               {areaCounts[a.key] ? <span className="area-tab__count">{areaCounts[a.key]}</span> : null}

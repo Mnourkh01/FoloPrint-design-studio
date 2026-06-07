@@ -39,6 +39,8 @@ export function normalizeDesignDocument(raw: AnyDesignDocument): DesignDocument 
     return {
       version: 2,
       templateId: raw.templateId,
+      // Color is preview-time only; absent stays absent (the default color applies).
+      ...(raw.colorKey !== undefined ? { colorKey: raw.colorKey } : {}),
       placements: raw.placements.map((p) => ({
         printAreaKey: p.printAreaKey,
         objects: p.objects.map(normalizeDesignObject),

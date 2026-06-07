@@ -179,6 +179,140 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('garment colors (v2.0)', () => {
+    it('templates carry the seeded colors in order with white as the default', () => {
+      expect(template.colors.map((c) => c.key)).toEqual(['white', 'black', 'heather']);
+      const white = template.colors[0]!;
+      expect(white.isDefault).toBe(true);
+      expect(template.colors.filter((c) => c.isDefault)).toHaveLength(1);
+
+      for (const color of template.colors) {
+        expect(color.hex).toMatch(/^#[0-9a-f]{6}$/i);
+        expect(color.imageUrl).toBe(`/templates/classic-tee/colors/${color.key}/image`);
+        expect(color.thumbUrl).toBe(`/templates/classic-tee/colors/${color.key}/thumb`);
+        // The back area carries its own view, so every color mirrors it.
+        expect(color.areaImages).toEqual([
+          {
+            printAreaKey: 'back',
+            imageUrl: `/templates/classic-tee/colors/${color.key}/areas/back/image`,
+            thumbUrl: `/templates/classic-tee/colors/${color.key}/areas/back/thumb`,
+          },
+        ]);
+      }
+    });
+
+    it('streams color blanks, thumbs, and area images as real PNGs', async () => {
+      for (const url of [
+        '/templates/classic-tee/colors/black/image',
+        '/templates/classic-tee/colors/black/thumb',
+        '/templates/classic-tee/colors/black/areas/back/image',
+        '/templates/classic-tee/colors/heather/areas/back/thumb',
+      ]) {
+        const png = await fetchPngBuffer(url);
+        expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+      }
+
+      // The default color streams the same blank as the template-level image.
+      const whiteBlank = await fetchPngBuffer('/templates/classic-tee/colors/white/image');
+      const templateBlank = await fetchPngBuffer('/templates/classic-tee/image');
+      expect(whiteBlank.equals(templateBlank)).toBe(true);
+
+      // A non-default color is a genuinely different image.
+      const blackBlank = await fetchPngBuffer('/templates/classic-tee/colors/black/image');
+      expect(blackBlank.equals(templateBlank)).toBe(false);
+    });
+
+    it('404s for unknown colors and areas without a color-specific view', async () => {
+      await http().get('/templates/classic-tee/colors/neon/image').expect(404);
+      await http().get('/templates/classic-tee/colors/neon/thumb').expect(404);
+      // Front uses the template-level view; there is no color AREA image for it.
+      await http().get('/templates/classic-tee/colors/black/areas/front/image').expect(404);
+      await http().get('/templates/classic-tee/colors/black/areas/nope/image').expect(404);
+    });
+
+    it('saves a design with a colorKey, echoes it, and round-trips through update', async () => {
+      const asset = await uploadPng();
+      const created = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          colorKey: 'black',
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+        })
+        .expect(201);
+      const design = created.body as DesignProjectDto;
+      expect(design.design.colorKey).toBe('black');
+
+      // Update to another color; the reopened document carries it.
+      await http()
+        .put(`/designs/${design.id}`)
+        .send({
+          templateId: template.id,
+          colorKey: 'heather',
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+        })
+        .expect(200);
+      const reopened = await http().get(`/designs/${design.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.colorKey).toBe('heather');
+    });
+
+    it('omits colorKey entirely when the client never sent one (byte-compat)', async () => {
+      const asset = await uploadPng();
+      const created = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+        })
+        .expect(201);
+      expect('colorKey' in (created.body as DesignProjectDto).design).toBe(false);
+    });
+
+    it('rejects unknown and malformed color keys', async () => {
+      const asset = await uploadPng();
+      const placements = [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }];
+
+      const unknown = await http()
+        .post('/designs')
+        .send({ templateId: template.id, colorKey: 'neon', placements })
+        .expect(400);
+      expect((unknown.body as { message: string }).message).toContain('no color "neon"');
+
+      await http()
+        .post('/designs')
+        .send({ templateId: template.id, colorKey: 'Black', placements })
+        .expect(400);
+      await http()
+        .post('/designs')
+        .send({ templateId: template.id, colorKey: '', placements })
+        .expect(400);
+    });
+
+    it('renders the preview on the chosen color blank (different pixels per color)', async () => {
+      const asset = await uploadPng();
+      const make = async (colorKey?: string): Promise<Buffer> => {
+        const res = await http()
+          .post('/designs')
+          .send({
+            templateId: template.id,
+            ...(colorKey ? { colorKey } : {}),
+            placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+          })
+          .expect(201);
+        const design = res.body as DesignProjectDto;
+        await http().post(`/designs/${design.id}/render`).expect(201);
+        return fetchPngBuffer(`/designs/${design.id}/preview/front`);
+      };
+
+      const [onDefault, onBlack] = await Promise.all([make(), make('black')]);
+      const dims = await sharp(onBlack).metadata();
+      expect(dims.width).toBe(template.canvasWidth);
+      expect(dims.height).toBe(template.canvasHeight);
+      // Same artwork, different garment: the previews must differ.
+      expect(onBlack.equals(onDefault)).toBe(false);
+    });
+  });
+
   describe('POST /assets/upload', () => {
     it('accepts a real PNG', async () => {
       const asset = await uploadPng();

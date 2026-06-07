@@ -545,6 +545,41 @@ button {
   color: var(--ink-soft);
 }
 
+/* Garment color swatches (v2.0) */
+.studio__swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.swatch {
+  appearance: none;
+  padding: 3px;
+  border: 1.5px solid var(--studio-line);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  line-height: 0;
+  transition: border-color 0.12s ease;
+}
+
+.swatch:hover {
+  border-color: var(--ink-soft);
+}
+
+.swatch--active {
+  border-color: var(--ink);
+}
+
+.swatch__chip {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
 .studio__area-list {
   display: grid;
   gap: 6px;

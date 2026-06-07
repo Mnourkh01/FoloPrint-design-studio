@@ -243,6 +243,18 @@ export class CreateDesignDto {
   @IsUUID()
   templateId!: string;
 
+  /**
+   * Chosen garment color (TemplateColor key, v2.0); missing means the template's
+   * default color. Existence on the template is enforced in DesignsService.
+   */
+  @IsOptional()
+  @IsString()
+  @Length(1, 50)
+  @Matches(/^[a-z0-9][a-z0-9-]*$/, {
+    message: 'colorKey must be a lowercase kebab-case key',
+  })
+  colorKey?: string;
+
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(8)

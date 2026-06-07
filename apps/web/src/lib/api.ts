@@ -87,6 +87,8 @@ export async function cropAsset(
 
 export interface SaveDesignPayload {
   templateId: string;
+  /** Chosen garment color key (v2.0); omitted = the template's default color. */
+  colorKey?: string;
   placements: DesignDocument['placements'];
 }
 

@@ -111,6 +111,18 @@ describe('normalizeDesignDocument', () => {
     const bogus = { version: 99, templateId: TEMPLATE_ID } as unknown as AnyDesignDocument;
     expect(() => normalizeDesignDocument(bogus)).toThrow(/Unsupported design document version: 99/);
   });
+
+  it('passes colorKey through on v2 and never invents one when absent', () => {
+    const base = {
+      version: 2 as const,
+      templateId: TEMPLATE_ID,
+      placements: [{ printAreaKey: 'front', objects: [centeredObject(FRONT)] }],
+    };
+
+    expect(normalizeDesignDocument({ ...base, colorKey: 'black' }).colorKey).toBe('black');
+    // Absent stays absent: pre-v2.0 documents must persist byte-identical.
+    expect('colorKey' in normalizeDesignDocument(base)).toBe(false);
+  });
 });
 
 describe('validateDesignPlacements', () => {

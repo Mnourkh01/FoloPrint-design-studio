@@ -166,6 +166,12 @@ export interface StoredDesignPlacement {
 export interface DesignDocument {
   version: 2;
   templateId: string;
+  /**
+   * Chosen garment color (TemplateColor key, v2.0). Preview-time choice only:
+   * it never affects placement geometry or validation. Absent = the template's
+   * default color (pre-v2.0 documents persist byte-identical).
+   */
+  colorKey?: string;
   placements: DesignPlacement[];
 }
 
@@ -181,6 +187,7 @@ export interface DesignDocumentV1 {
 export interface StoredDesignDocumentV2 {
   version: 2;
   templateId: string;
+  colorKey?: string;
   placements: StoredDesignPlacement[];
 }
 
@@ -227,6 +234,35 @@ export interface PrintAreaDto {
   heightInches: number | null;
 }
 
+/** Color-specific view images for one print area that carries its own view (e.g. back). */
+export interface TemplateColorAreaImageDto {
+  printAreaKey: string;
+  /** Relative API URL streaming this area's blank in this color. */
+  imageUrl: string;
+  thumbUrl: string;
+}
+
+/**
+ * One garment color of a template (v2.0). The blank photo is color-specific;
+ * the garment mask and the fabric overlay are shared across colors (same photo
+ * geometry). Color is a preview-time choice: it never affects print areas,
+ * placement geometry, or validation.
+ */
+export interface TemplateColorDto {
+  /** Stable key used in URLs and design documents ('white', 'black', ...). */
+  key: string;
+  name: string;
+  /** Swatch color for the picker UI (strict #RRGGBB). */
+  hex: string;
+  /** Exactly one default per template; designs without a colorKey render in it. */
+  isDefault: boolean;
+  /** Relative API URL streaming the template-level (front) blank in this color. */
+  imageUrl: string;
+  thumbUrl: string;
+  /** One entry per print area that carries its own view (mirrors PrintAreaDto.imageUrl). */
+  areaImages: TemplateColorAreaImageDto[];
+}
+
 export interface ProductTemplateDto {
   id: string;
   name: string;
@@ -242,6 +278,11 @@ export interface ProductTemplateDto {
   /** How overlays composite over the artwork ('over' unless the template says otherwise). */
   overlayBlend: OverlayBlend;
   printAreas: PrintAreaDto[];
+  /**
+   * Garment colors in display order; empty for templates without color variants.
+   * The default color's images are the template-level images.
+   */
+  colors: TemplateColorDto[];
 }
 
 export interface UploadedAssetDto {

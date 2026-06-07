@@ -70,4 +70,24 @@ export class DesignsController {
     const previewPath = await this.designs.findPreview(id, printAreaKey);
     return new StreamableFile(this.storage.readStream(previewPath));
   }
+
+  /**
+   * Production print file for one placed area: the ink alone, transparent
+   * background, print resolution (300dpi over the area's physical size).
+   * Generated on demand from the stored design; nothing is persisted.
+   * Throttled like render: it is the same sharp/Pango work per request.
+   */
+  @Get(':id/print-file/:printAreaKey')
+  @Header('Content-Type', 'image/png')
+  @Header('Cache-Control', 'no-cache')
+  @Throttle({ default: { limit: RENDER_THROTTLE_LIMIT, ttl: 60_000 } })
+  async printFile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('printAreaKey') printAreaKey: string,
+  ): Promise<StreamableFile> {
+    const png = await this.designs.renderPrintFile(id, printAreaKey);
+    return new StreamableFile(png, {
+      disposition: `attachment; filename="design-${id.slice(0, 8)}-${printAreaKey}-print.png"`,
+    });
+  }
 }

@@ -971,6 +971,85 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('print files (v2.2)', () => {
+    it('streams the ink alone at 300dpi over the physical print size, transparent background', async () => {
+      const asset = await uploadPng();
+      const design = await createFrontBackDesign(asset.id);
+
+      const png = await fetchPngBuffer(`/designs/${design.id}/print-file/front`);
+      expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+
+      const meta = await sharp(png).metadata();
+      // Sheet = the print area's physical size at 300dpi (width drives the scale).
+      const front = area('front');
+      expect(meta.width).toBe(Math.round((front.widthInches ?? 12) * 300));
+      expect(Math.round(meta.density ?? 0)).toBe(300);
+
+      // Corner: fully transparent (no garment photo, no backdrop).
+      const corner = await sharp(png).extract({ left: 1, top: 1, width: 1, height: 1 }).ensureAlpha().raw().toBuffer();
+      expect(corner[3]).toBe(0);
+
+      // Center: the uploaded blue artwork, opaque, scaled into place.
+      const center = await sharp(png)
+        .extract({ left: Math.round((meta.width ?? 2) / 2), top: Math.round((meta.height ?? 2) / 2), width: 1, height: 1 })
+        .ensureAlpha()
+        .raw()
+        .toBuffer();
+      expect(center[3]).toBe(255);
+      expect(center[2]).toBeGreaterThan(150); // blue channel of the fixture PNG
+    });
+
+    it('renders text designs as print files too', async () => {
+      const front = area('front');
+      const res = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          placements: [
+            {
+              printAreaKey: 'front',
+              objects: [
+                {
+                  type: 'text',
+                  text: 'PRINT ME',
+                  fontFamily: 'inter',
+                  fontSize: 60,
+                  color: '#112233',
+                  align: 'center',
+                  x: front.x + front.width / 2,
+                  y: front.y + front.height / 2,
+                  width: 240,
+                  height: 70,
+                  rotation: 0,
+                },
+              ],
+            },
+          ],
+        })
+        .expect(201);
+
+      const png = await fetchPngBuffer(`/designs/${(res.body as DesignProjectDto).id}/print-file/front`);
+      const stats = await sharp(png).stats();
+      // Some opaque ink exists; the sheet is not blank.
+      expect(stats.channels[3]!.max).toBe(255);
+    });
+
+    it('404s for areas without artwork and unknown designs, 400 for malformed ids', async () => {
+      const asset = await uploadPng();
+      const res = await http()
+        .post('/designs')
+        .send({
+          templateId: template.id,
+          placements: [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }],
+        })
+        .expect(201);
+
+      await http().get(`/designs/${(res.body as DesignProjectDto).id}/print-file/back`).expect(404);
+      await http().get('/designs/00000000-0000-4000-8000-000000000000/print-file/front').expect(404);
+      await http().get('/designs/not-a-uuid/print-file/front').expect(400);
+    });
+  });
+
   describe('text objects (v1.5)', () => {
     const textIn = (
       a: PrintAreaDto,

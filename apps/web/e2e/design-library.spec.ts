@@ -116,6 +116,16 @@ test.describe.serial('design library', () => {
     await expect(page.getByTestId('preview-image-back')).toBeVisible();
     await expect(page.getByTestId('design-color')).toContainText('Black');
 
+    // --- Print files: one download link per placed side, streaming a real PNG ---
+    await expect(page.getByTestId('print-file-front')).toBeVisible();
+    await expect(page.getByTestId('print-file-back')).toBeVisible();
+    const printFileUrl = await page.getByTestId('print-file-front').getAttribute('href');
+    const response = await page.request.get(printFileUrl!);
+    expect(response.status()).toBe(200);
+    expect(response.headers()['content-type']).toContain('image/png');
+    const body = await response.body();
+    expect(body.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+
     // --- Back to the library via the preview page link ---
     await page.getByTestId('all-designs').click();
     await expect(page).toHaveURL(/\/designs$/);

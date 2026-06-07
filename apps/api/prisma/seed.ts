@@ -94,6 +94,23 @@ const TEMPLATES: TemplateSpec[] = [
       { key: 'back', name: 'Back print', x: 418, y: 340, width: 420, height: 560, widthInches: 12, heightInches: 16, sortOrder: 1, ownImages: true },
     ],
   },
+  {
+    // Assets derived with lumaThreshold 170 (not the default 200): the photo's
+    // backdrop sits at luma ~133-159 while seam shadows on the garment reach
+    // ~180, so 200 let the flood fill creep through the rib seams and drop the
+    // cuffs/hem as separate components.
+    slug: 'classic-hoodie',
+    name: 'Classic Hoodie',
+    canvas: 1254,
+    areas: [
+      // Garment bbox ~x 226..1028, centerline x 627; ~31.7 px/in. The front
+      // print zone is short on purpose: hood drape ends ~y 455 and the kangaroo
+      // pocket seam starts ~y 720 (both measured from the photo's luma dips).
+      { key: 'front', name: 'Front print', x: 437, y: 465, width: 380, height: 240, widthInches: 12, heightInches: 7.6, sortOrder: 0, ownImages: false },
+      // Back runs from below the hood drape (~y 390) to the hem ribbing (~y 1010).
+      { key: 'back', name: 'Back print', x: 437, y: 450, width: 380, height: 510, widthInches: 12, heightInches: 16.1, sortOrder: 1, ownImages: true },
+    ],
+  },
 ];
 
 async function seedTemplate(storageRoot: string, spec: TemplateSpec): Promise<void> {

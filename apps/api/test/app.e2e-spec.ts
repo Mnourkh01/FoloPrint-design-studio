@@ -311,6 +311,67 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       // Same artwork, different garment: the previews must differ.
       expect(onBlack.equals(onDefault)).toBe(false);
     });
+
+    it('resolves the display color on the project and list DTOs', async () => {
+      const asset = await uploadPng();
+      const placements = [{ printAreaKey: 'front', objects: [objectIn(area('front'), asset.id)] }];
+
+      const picked = (
+        await http().post('/designs').send({ templateId: template.id, colorKey: 'black', placements }).expect(201)
+      ).body as DesignProjectDto;
+      expect(picked.color).toEqual({ key: 'black', name: 'Black', hex: '#232227' });
+
+      // No stored colorKey -> the template default, not null (the template has colors).
+      const defaulted = (
+        await http().post('/designs').send({ templateId: template.id, placements }).expect(201)
+      ).body as DesignProjectDto;
+      expect(defaulted.color).toEqual({ key: 'white', name: 'White', hex: '#f2f2f0' });
+
+      // The list rows carry the same resolved color.
+      const list = (await http().get('/designs?pageSize=50').expect(200)).body as DesignListDto;
+      const row = (id: string) => list.items.find((i) => i.id === id)!;
+      expect(row(picked.id).color).toEqual({ key: 'black', name: 'Black', hex: '#232227' });
+      expect(row(defaulted.id).color).toEqual({ key: 'white', name: 'White', hex: '#f2f2f0' });
+    });
+  });
+
+  describe('classic hoodie (v2.0 third product)', () => {
+    it('lists the hoodie with both areas and the three colors', async () => {
+      const res = await http().get('/templates').expect(200);
+      const hoodie = (res.body as ProductTemplateDto[]).find((t) => t.slug === 'classic-hoodie');
+      expect(hoodie).toBeDefined();
+      expect(hoodie!.canvasWidth).toBe(1254);
+      expect(hoodie!.overlayBlend).toBe('multiply');
+      expect(hoodie!.printAreas.map((a) => a.key)).toEqual(['front', 'back']);
+
+      // The front zone sits between the hood drape and the kangaroo pocket,
+      // so it is wider than tall (unlike the tee/sweatshirt fronts).
+      const front = hoodie!.printAreas.find((a) => a.key === 'front')!;
+      expect(front.height).toBeLessThan(front.width);
+
+      expect(hoodie!.colors.map((c) => c.key)).toEqual(['white', 'black', 'heather']);
+      for (const color of hoodie!.colors) {
+        expect(color.imageUrl).toBe(`/templates/classic-hoodie/colors/${color.key}/image`);
+        expect(color.thumbUrl).toBe(`/templates/classic-hoodie/colors/${color.key}/thumb`);
+      }
+    });
+
+    it('streams the hoodie blank, thumb, and derived color views as PNGs', async () => {
+      for (const url of [
+        '/templates/classic-hoodie/image',
+        '/templates/classic-hoodie/thumb',
+        '/templates/classic-hoodie/colors/black/image',
+        '/templates/classic-hoodie/colors/heather/areas/back/thumb',
+      ]) {
+        const png = await fetchPngBuffer(url);
+        expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+      }
+
+      // The derived black blank is a genuinely different image from the white one.
+      const black = await fetchPngBuffer('/templates/classic-hoodie/colors/black/image');
+      const white = await fetchPngBuffer('/templates/classic-hoodie/image');
+      expect(black.equals(white)).toBe(false);
+    });
   });
 
   describe('POST /assets/upload', () => {

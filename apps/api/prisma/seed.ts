@@ -61,11 +61,25 @@ interface ColorSpec {
  * garment mask -> tinted blank), so no extra photo binaries live in the repo.
  * The mask and the multiply overlay stay color-independent: they carry the
  * photo's geometry and shading, which the recolor preserves.
+ *
+ * One shared palette for every template (the array order is the picker order):
+ * neutrals light -> dark, then blues, greens, warms. Keys are forever: stored
+ * designs reference them, so rename/remove means a data migration.
  */
 const COLORS: ColorSpec[] = [
   { key: 'white', name: 'White', hex: '#f2f2f0', isDefault: true },
-  { key: 'black', name: 'Black', hex: '#232227' },
+  { key: 'sand', name: 'Sand', hex: '#ddd3bd' },
   { key: 'heather', name: 'Heather Gray', hex: '#a7a7a3', noise: 0.11 },
+  { key: 'dark-heather', name: 'Dark Heather', hex: '#4a4a4f', noise: 0.09 },
+  { key: 'black', name: 'Black', hex: '#232227' },
+  { key: 'sky', name: 'Sky Blue', hex: '#a9c6e0' },
+  { key: 'royal', name: 'Royal Blue', hex: '#2451a6' },
+  { key: 'navy', name: 'Navy', hex: '#1f2a44' },
+  { key: 'forest', name: 'Forest Green', hex: '#234633' },
+  { key: 'olive', name: 'Olive', hex: '#5b6044' },
+  { key: 'red', name: 'Red', hex: '#b3202c' },
+  { key: 'burgundy', name: 'Burgundy', hex: '#6e2433' },
+  { key: 'pink', name: 'Pink', hex: '#e7b9c6' },
 ];
 
 /**

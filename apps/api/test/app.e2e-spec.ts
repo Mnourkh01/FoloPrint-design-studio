@@ -179,9 +179,27 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  // The one shared garment palette, in seed (= picker) order. Every template
+  // carries exactly this list; the seed is the source of truth.
+  const PALETTE = [
+    'white',
+    'sand',
+    'heather',
+    'dark-heather',
+    'black',
+    'sky',
+    'royal',
+    'navy',
+    'forest',
+    'olive',
+    'red',
+    'burgundy',
+    'pink',
+  ];
+
   describe('garment colors (v2.0)', () => {
     it('templates carry the seeded colors in order with white as the default', () => {
-      expect(template.colors.map((c) => c.key)).toEqual(['white', 'black', 'heather']);
+      expect(template.colors.map((c) => c.key)).toEqual(PALETTE);
       const white = template.colors[0]!;
       expect(white.isDefault).toBe(true);
       expect(template.colors.filter((c) => c.isDefault)).toHaveLength(1);
@@ -349,7 +367,7 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       const front = hoodie!.printAreas.find((a) => a.key === 'front')!;
       expect(front.height).toBeLessThan(front.width);
 
-      expect(hoodie!.colors.map((c) => c.key)).toEqual(['white', 'black', 'heather']);
+      expect(hoodie!.colors.map((c) => c.key)).toEqual(PALETTE);
       for (const color of hoodie!.colors) {
         expect(color.imageUrl).toBe(`/templates/classic-hoodie/colors/${color.key}/image`);
         expect(color.thumbUrl).toBe(`/templates/classic-hoodie/colors/${color.key}/thumb`);

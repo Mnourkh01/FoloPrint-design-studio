@@ -7,10 +7,14 @@ const H = 120;
 /** Garment rect inside the synthetic blank. */
 const GARMENT = { left: 20, top: 20, width: 80, height: 80 };
 
+/** Backdrop gray (mid, like the studio photos: clearly darker than lit fabric). */
+const BACKDROP = 150;
+
 /**
- * Synthetic white-garment blank: light-gray backdrop, garment rect with a
+ * Synthetic white-garment blank: mid-gray backdrop, garment rect with a
  * vertical shading gradient (250 at the top fading to 100 at the bottom,
- * like fabric falling into shadow).
+ * like fabric falling into shadow), plus a 3px bright fabric SLIVER just right
+ * of the mask rect (models the shadowed edge the real masks undershoot).
  */
 const blank = (): Promise<Buffer> => {
   const raw = Buffer.alloc(W * H * 4);
@@ -22,7 +26,16 @@ const blank = (): Promise<Buffer> => {
         x < GARMENT.left + GARMENT.width &&
         y >= GARMENT.top &&
         y < GARMENT.top + GARMENT.height;
-      const v = inGarment ? Math.round(250 - (150 * (y - GARMENT.top)) / GARMENT.height) : 230;
+      const inSliver =
+        x >= GARMENT.left + GARMENT.width &&
+        x < GARMENT.left + GARMENT.width + 3 &&
+        y >= GARMENT.top &&
+        y < GARMENT.top + GARMENT.height;
+      const v = inGarment
+        ? Math.round(250 - (150 * (y - GARMENT.top)) / GARMENT.height)
+        : inSliver
+          ? 240
+          : BACKDROP;
       raw[i] = v;
       raw[i + 1] = v;
       raw[i + 2] = v;
@@ -63,7 +76,7 @@ describe('recolorGarment', () => {
     const png = await recolorGarment({ source: await blank(), mask: await garmentMask(), hex: '#1f2a44' });
 
     // Backdrop corner: byte-identical to the source.
-    expect(await rgbAt(png, 5, 5)).toEqual([230, 230, 230]);
+    expect(await rgbAt(png, 5, 5)).toEqual([BACKDROP, BACKDROP, BACKDROP]);
 
     // Bright fabric (top of garment): near the target navy, blue channel dominant.
     const [r, g, b] = await rgbAt(png, 60, 25);
@@ -106,6 +119,36 @@ describe('recolorGarment', () => {
     const [s2] = await rgbAt(smooth, 41, 30);
     expect(s1).toBe(s2); // smooth fabric: neighbors identical on a same-shade row
     expect(n1).not.toBe(n2); // heather: neighbors differ
+  });
+
+  it('keeps the target hue exact on saturated colors (no highlight wash)', async () => {
+    const png = await recolorGarment({ source: await blank(), mask: await garmentMask(), hex: '#b3202c' });
+
+    // Brightest fabric: strongly red-dominant, not washed toward pink/white.
+    const [r, g, b] = await rgbAt(png, 60, 25);
+    expect(r).toBeGreaterThan(g * 3);
+    expect(r).toBeGreaterThan(b * 3);
+  });
+
+  it('tints the bright sliver past the mask edge but never halos the backdrop', async () => {
+    const png = await recolorGarment({ source: await blank(), mask: await garmentMask(), hex: '#1f2a44' });
+
+    // The fabric sliver the mask missed: tinted (blue-dominant), not left white.
+    const [r, , b] = await rgbAt(png, GARMENT.left + GARMENT.width + 1, 60);
+    expect(b).toBeGreaterThan(r);
+    expect(b).toBeLessThan(200); // genuinely tinted, nothing like the 240 source
+    // Backdrop inside the dilation reach but darker than fabric: untouched.
+    expect(await rgbAt(png, GARMENT.left + GARMENT.width + 6, 60)).toEqual([
+      BACKDROP,
+      BACKDROP,
+      BACKDROP,
+    ]);
+    // Well outside: backdrop byte-identical.
+    expect(await rgbAt(png, GARMENT.left + GARMENT.width + 15, 60)).toEqual([
+      BACKDROP,
+      BACKDROP,
+      BACKDROP,
+    ]);
   });
 
   it('rejects a malformed hex color', async () => {

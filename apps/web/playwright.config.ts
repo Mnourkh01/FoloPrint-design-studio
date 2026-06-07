@@ -8,21 +8,21 @@ const CI = Boolean(process.env.CI);
  * Starts the API and the web app itself (reuses already-running ones in dev).
  *
  * Local runs use the dev servers (watch mode, instant iteration). CI runs the
- * PRODUCTION builds: dev-mode Next compiles routes on first hit and re-checks
- * types per request, which under a long render-heavy suite caused a roaming
- * one-test stall (always green isolated). The CI workflow builds the API (type
- * gate) and the web app before Playwright runs, so the servers here only start
- * what is already compiled.
+ * PRODUCTION builds the workflow compiled beforehand: closer to reality, a
+ * couple of minutes faster, and it exercises the real start scripts (which
+ * caught a stale api start path the first time it ran).
  */
 export default defineConfig({
   testDir: './e2e',
   globalSetup: './e2e/global-setup.ts',
   timeout: 120_000,
   expect: { timeout: 15_000 },
-  // One retry kept as a safety net for genuine environmental hiccups (a real
-  // regression still fails every attempt); production servers removed the
-  // dev-mode stall this used to absorb at retries: 2.
-  retries: CI ? 1 : 0,
+  // The roaming one-test 120s stall reproduces even on production servers
+  // (one render-heavy spec per run, always green on retry in ~2s), so the
+  // cause is NOT dev-mode compilation; current suspect is render contention
+  // in the API during the marathon. Retries stay at 2 until that is found;
+  // a real regression still fails every attempt.
+  retries: CI ? 2 : 0,
   // One worker: the design-library spec wipes the design_projects table for its
   // empty-state assertion, which must never race another spec mid-flow.
   workers: 1,

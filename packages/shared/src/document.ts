@@ -23,6 +23,7 @@ export function normalizeDesignObject(obj: StoredDesignObject): DesignObject {
   if (obj.type === 'text') {
     return { ...obj, direction: obj.direction ?? 'auto', wrapMode: obj.wrapMode ?? 'none' };
   }
+  // Shapes (v2.7) and typed images carry no additive defaults; pass them through.
   return obj;
 }
 

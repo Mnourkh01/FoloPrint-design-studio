@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Line, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
+import { Canvas, Ellipse, FabricImage, IText, Line, Pattern, Polygon, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
   ARC_GLYPH_HEIGHT_FACTOR,
   ARC_SWEEP_MAX,
   ARC_SWEEP_MIN,
   evaluateObjectQuality,
+  FONT_CATEGORY_ORDER,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
   FONT_WHITELIST,
@@ -24,6 +25,10 @@ import {
   printAreaPpi,
   resolveTextDirection,
   SHADOW_OFFSET_MAX,
+  SHAPE_KINDS,
+  SHAPE_STROKE_WIDTH_MAX,
+  SHAPE_STROKE_WIDTH_MIN,
+  starPolygonPoints,
   TEXT_MAX_LINES,
   validateDesignPlacements,
   type DesignObject,
@@ -36,6 +41,8 @@ import {
   type PrintAreaDto,
   type PrintQualityLevel,
   type ProductTemplateDto,
+  type ShapeKind,
+  type ShapeStroke,
   type TextAlign,
   type TextDirection,
   type TextOutline,
@@ -86,7 +93,7 @@ const BOUNDARY_ACTIVE = {
 
 /** View zoom (multiplier over the fit zoom) bounds for the stage zoom widget. */
 const VIEW_ZOOM_MIN = 0.5;
-const VIEW_ZOOM_MAX = 2;
+const VIEW_ZOOM_MAX = 3;
 const VIEW_ZOOM_STEP = 1.25;
 
 /** Client-side upload gate; mirrors the server's multer/sniff limits. */
@@ -109,7 +116,7 @@ const SNAP_GUIDE_STYLE = {
 } as const;
 
 /** Left tool rail entries; the contextual panel renders per active tool. */
-type StudioTool = 'product' | 'uploads' | 'text' | 'saved' | 'layers';
+type StudioTool = 'product' | 'templates' | 'uploads' | 'text' | 'shapes' | 'saved' | 'layers';
 
 /** Hand-drawn 24px stroke icons; no icon dependency for five glyphs. */
 const TOOL_ICONS: Record<StudioTool, React.ReactNode> = {
@@ -129,6 +136,18 @@ const TOOL_ICONS: Record<StudioTool, React.ReactNode> = {
       <path d="M5 6V4h14v2M12 4v16m-3 0h6" />
     </svg>
   ),
+  shapes: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <rect x="3.5" y="3.5" width="9.5" height="9.5" rx="1.5" />
+      <circle cx="15.5" cy="15.5" r="5" />
+    </svg>
+  ),
+  templates: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2" />
+      <path d="M3.5 9.5h17M9 9.5V20.5" />
+    </svg>
+  ),
   saved: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
       <path d="M6.5 3.5h11V21L12 16.8 6.5 21z" />
@@ -144,13 +163,23 @@ const TOOL_ICONS: Record<StudioTool, React.ReactNode> = {
 
 const TOOL_LABELS: Record<StudioTool, string> = {
   product: 'Product',
+  templates: 'Templates',
   uploads: 'Uploads',
   text: 'Text',
+  shapes: 'Shapes',
   saved: 'Saved',
   layers: 'Layers',
 };
 
-const TOOL_ORDER: StudioTool[] = ['product', 'uploads', 'text', 'saved', 'layers'];
+const TOOL_ORDER: StudioTool[] = [
+  'product',
+  'templates',
+  'uploads',
+  'text',
+  'shapes',
+  'saved',
+  'layers',
+];
 
 /** Align actions for the Position tool: edge/center against the object's print area. */
 type AlignAction = 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom';
@@ -255,12 +284,54 @@ const CONTEXT_TOOL_ICONS = {
   ),
 };
 
-/** Pattern panel choices; null = single image. */
-const PATTERN_CHOICES: { key: PatternType | null; label: string }[] = [
-  { key: null, label: 'None' },
-  { key: 'grid', label: 'Grid' },
-  { key: 'mirror', label: 'Mirror' },
-  { key: 'half-drop', label: 'Half-drop' },
+/**
+ * Pattern panel choices; null = single image. Each carries a tiny tile preview so
+ * the layout reads at a glance ("half-drop" means nothing as a word; the brick
+ * picture does). The keys still map to the contract PatternType.
+ */
+const PATTERN_CHOICES: { key: PatternType | null; label: string; icon: React.ReactNode }[] = [
+  {
+    key: null,
+    label: 'Single',
+    icon: (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden>
+        <rect x="9" y="9" width="6" height="6" rx="1" />
+      </svg>
+    ),
+  },
+  {
+    key: 'grid',
+    label: 'Grid',
+    icon: (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden>
+        <rect x="4" y="4" width="6" height="6" rx="1" />
+        <rect x="14" y="4" width="6" height="6" rx="1" />
+        <rect x="4" y="14" width="6" height="6" rx="1" />
+        <rect x="14" y="14" width="6" height="6" rx="1" />
+      </svg>
+    ),
+  },
+  {
+    key: 'mirror',
+    label: 'Mirror',
+    icon: (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden>
+        <path d="M11 5l-6 7 6 7z" fill="currentColor" stroke="none" />
+        <path d="M13 5l6 7-6 7z" />
+      </svg>
+    ),
+  },
+  {
+    key: 'half-drop',
+    label: 'Brick',
+    icon: (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden>
+        <rect x="3" y="4" width="6" height="6" rx="1" />
+        <rect x="15" y="4" width="6" height="6" rx="1" />
+        <rect x="9" y="14" width="6" height="6" rx="1" />
+      </svg>
+    ),
+  },
 ];
 
 /**
@@ -331,7 +402,14 @@ function ensureEditorFonts(): Promise<void> {
   if (!fontsLoadedPromise) {
     fontsLoadedPromise = Promise.all(
       FONT_WHITELIST.map(async (font) => {
-        if (document.fonts.check(`16px "${font.family}"`)) return;
+        // NOTE: do NOT guard with document.fonts.check(): when no @font-face for
+        // the family exists yet, check() returns TRUE (it assumes a system
+        // fallback can render the name), so the guard skipped loading every
+        // whitelist font and all editor text fell back to a default face.
+        // Skip only if THIS exact face is already registered as loaded.
+        for (const f of document.fonts) {
+          if (f.family === font.family && f.status === 'loaded') return;
+        }
         const face = new FontFace(font.family, `url(${apiUrl(fontFileUrl(font.key))})`);
         await face.load();
         document.fonts.add(face);
@@ -377,8 +455,225 @@ const OVERVIEW_TILE_WIDTH = 260;
 /** Defaults for a freshly added text object. */
 const TEXT_DEFAULTS = { fontKey: 'inter', fontSize: 48, color: '#1a1a1a', align: 'center' as TextAlign };
 
-/** Curated color swatches for the text panel; any #RRGGBB is valid, these are shortcuts. */
-const TEXT_SWATCHES = ['#1a1a1a', '#ffffff', '#cf3f22', '#1d4ed8', '#047857', '#b45309'];
+/** Default fill for a freshly added shape; stroke off by default. */
+const SHAPE_DEFAULTS = { fill: '#1d4ed8' };
+
+/** The three vector shapes the studio offers, in panel order (friendly labels). */
+const SHAPE_CHOICES: { key: ShapeKind; label: string }[] = [
+  { key: 'rect', label: 'Square' },
+  { key: 'circle', label: 'Circle' },
+  { key: 'star', label: 'Star' },
+];
+
+/** Filled silhouette glyphs for the shape-add buttons. */
+const SHAPE_GLYPHS: Record<ShapeKind, React.ReactNode> = {
+  rect: (
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  ),
+  circle: (
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden>
+      <circle cx="12" cy="12" r="9" />
+    </svg>
+  ),
+  star: (
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden>
+      <path d="M12 2.5l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.8 6.2 20.9l1.1-6.5L2.6 9.3l6.5-.9z" />
+    </svg>
+  ),
+};
+
+/**
+ * One-tap shape stroke looks (mirrors OUTLINE_PRESETS for text). Each entry IS the
+ * saved value, so a chip preview shows exactly what gets applied; the exact color
+ * and width still live under the panel's stroke controls.
+ */
+const SHAPE_STROKE_PRESETS: { key: string; label: string; stroke: ShapeStroke | null }[] = [
+  { key: 'none', label: 'None', stroke: null },
+  { key: 'white', label: 'White', stroke: { color: '#ffffff', width: 6 } },
+  { key: 'black', label: 'Black', stroke: { color: '#000000', width: 6 } },
+  { key: 'gold', label: 'Gold', stroke: { color: '#d4af37', width: 6 } },
+  { key: 'thick', label: 'Thick', stroke: { color: '#ffffff', width: 14 } },
+];
+
+/** Curated color palette for the text panel; any #RRGGBB is valid, these are shortcuts. */
+const TEXT_SWATCHES = [
+  '#1a1a1a', '#6b7280', '#ffffff', '#cf3f22', '#dc2626', '#db2777',
+  '#f59e0b', '#facc15', '#16a34a', '#047857', '#0ea5e9', '#1d4ed8',
+  '#1e3a8a', '#7c3aed', '#9d174d', '#b45309', '#065f46', '#d4af37',
+];
+
+/**
+ * One-tap text effect looks. Each entry IS the saved value, so the chip preview
+ * (rendered with the same numbers) shows exactly what gets applied. Picked over
+ * raw color/width/offset boxes so a first-timer reads the result at a glance;
+ * the exact values still live under Advanced for fine tuning.
+ */
+const OUTLINE_PRESETS: { key: string; label: string; outline: TextOutline | null }[] = [
+  { key: 'none', label: 'None', outline: null },
+  { key: 'white', label: 'White', outline: { color: '#ffffff', width: 4 } },
+  { key: 'black', label: 'Black', outline: { color: '#000000', width: 4 } },
+  { key: 'gold', label: 'Gold', outline: { color: '#d4af37', width: 4 } },
+  { key: 'red', label: 'Red', outline: { color: '#cf3f22', width: 4 } },
+  { key: 'thick', label: 'Thick', outline: { color: '#ffffff', width: 8 } },
+];
+
+const SHADOW_PRESETS: { key: string; label: string; shadow: TextShadow | null }[] = [
+  { key: 'none', label: 'None', shadow: null },
+  { key: 'soft', label: 'Soft', shadow: { color: '#000000', offsetX: 2, offsetY: 2 } },
+  { key: 'drop', label: 'Drop', shadow: { color: '#000000', offsetX: 4, offsetY: 4 } },
+  { key: 'long', label: 'Long', shadow: { color: '#000000', offsetX: 8, offsetY: 8 } },
+  { key: 'lift', label: 'Lift', shadow: { color: '#000000', offsetX: 0, offsetY: 5 } },
+  { key: 'pop', label: 'Pop', shadow: { color: '#cf3f22', offsetX: 3, offsetY: 3 } },
+];
+
+/**
+ * One-tap text "looks": a curated combo of font + color + outline + shadow +
+ * spacing so a non-designer gets a professional result in a single click (the
+ * "I don't know how to start" answer). Each look only uses straight-text props
+ * (no arc) so it applies in one updateActiveText pass and never trips the
+ * arc-excludes-effects contract rule. The chip preview is rendered with the same
+ * values, so what you see is what you get. Showcases the expanded font library.
+ */
+type TextStylePreset = {
+  key: string;
+  label: string;
+  fontKey: string;
+  fill: string;
+  outline: TextOutline | null;
+  shadow: TextShadow | null;
+  letterSpacing?: number;
+};
+
+const TEXT_STYLE_PRESETS: TextStylePreset[] = [
+  { key: 'varsity', label: 'Varsity', fontKey: 'archivo-black', fill: '#1d4ed8', outline: { color: '#ffffff', width: 6 }, shadow: null },
+  { key: 'sport', label: 'Sport', fontKey: 'anton', fill: '#cf3f22', outline: { color: '#ffffff', width: 5 }, shadow: { color: '#000000', offsetX: 2, offsetY: 2 } },
+  { key: 'retro', label: 'Retro', fontKey: 'bungee', fill: '#b45309', outline: null, shadow: { color: '#000000', offsetX: 3, offsetY: 3 } },
+  { key: 'neon', label: 'Neon', fontKey: 'oswald', fill: '#22d3ee', outline: { color: '#0e7490', width: 4 }, shadow: { color: '#000000', offsetX: 2, offsetY: 2 } },
+  { key: 'vintage', label: 'Vintage', fontKey: 'dm-serif-display', fill: '#1a1a1a', outline: null, shadow: null, letterSpacing: 4 },
+  { key: 'handwritten', label: 'Casual', fontKey: 'pacifico', fill: '#1a1a1a', outline: null, shadow: null },
+  { key: 'minimal', label: 'Minimal', fontKey: 'montserrat', fill: '#1a1a1a', outline: null, shadow: null, letterSpacing: 8 },
+  { key: 'birthday', label: 'Party', fontKey: 'lobster', fill: '#db2777', outline: null, shadow: { color: '#000000', offsetX: 3, offsetY: 3 } },
+];
+
+/**
+ * Curated starter designs ("logos") a non-designer opens and edits, rather than
+ * facing a blank shirt. Each is a stack of styled text lines positioned by
+ * fractions of the active print area, so the same template fits any product/side.
+ * They drop in as ordinary, fully-editable text objects (no special object kind),
+ * so they render server-side and round-trip with zero contract changes.
+ */
+type StarterLine = {
+  text: string;
+  fontKey: string;
+  fill: string;
+  outline?: TextOutline;
+  shadow?: TextShadow;
+  /** Center Y as a fraction of the print-area height. */
+  cy: number;
+  /** Font size as a fraction of the print-area height. */
+  sizeFrac: number;
+  letterSpacing?: number;
+  align?: TextAlign;
+};
+type DesignTemplate = { key: string; name: string; lines: StarterLine[] };
+
+const DESIGN_TEMPLATES: DesignTemplate[] = [
+  {
+    key: 'varsity-stack',
+    name: 'Varsity',
+    lines: [
+      { text: 'EST. 1994', fontKey: 'oswald', fill: '#1d4ed8', cy: 0.36, sizeFrac: 0.045, letterSpacing: 6 },
+      { text: 'BROOKLYN', fontKey: 'archivo-black', fill: '#1d4ed8', outline: { color: '#ffffff', width: 6 }, cy: 0.5, sizeFrac: 0.13 },
+      { text: 'ATHLETIC CLUB', fontKey: 'oswald', fill: '#1d4ed8', cy: 0.62, sizeFrac: 0.04, letterSpacing: 4 },
+    ],
+  },
+  {
+    key: 'vintage-badge',
+    name: 'Vintage',
+    lines: [
+      { text: 'ORIGINAL', fontKey: 'oswald', fill: '#1a1a1a', cy: 0.37, sizeFrac: 0.045, letterSpacing: 6 },
+      { text: 'Heritage', fontKey: 'dm-serif-display', fill: '#1a1a1a', cy: 0.5, sizeFrac: 0.12 },
+      { text: 'SINCE 2010', fontKey: 'oswald', fill: '#1a1a1a', cy: 0.62, sizeFrac: 0.04, letterSpacing: 5 },
+    ],
+  },
+  {
+    key: 'bold-statement',
+    name: 'Bold',
+    lines: [
+      { text: 'STAY', fontKey: 'anton', fill: '#1a1a1a', cy: 0.42, sizeFrac: 0.16 },
+      { text: 'WILD', fontKey: 'anton', fill: '#cf3f22', cy: 0.58, sizeFrac: 0.16 },
+    ],
+  },
+  {
+    key: 'script-name',
+    name: 'Script',
+    lines: [
+      { text: 'the', fontKey: 'oswald', fill: '#db2777', cy: 0.38, sizeFrac: 0.05 },
+      { text: 'Daydream', fontKey: 'pacifico', fill: '#db2777', cy: 0.52, sizeFrac: 0.12 },
+      { text: 'CLUB', fontKey: 'oswald', fill: '#db2777', cy: 0.64, sizeFrac: 0.045, letterSpacing: 8 },
+    ],
+  },
+  {
+    key: 'monogram',
+    name: 'Monogram',
+    lines: [
+      { text: 'M', fontKey: 'archivo-black', fill: '#1a1a1a', outline: { color: '#cf3f22', width: 5 }, cy: 0.5, sizeFrac: 0.28 },
+    ],
+  },
+  {
+    key: 'good-vibes',
+    name: 'Good Vibes',
+    lines: [
+      { text: 'GOOD VIBES', fontKey: 'bungee', fill: '#b45309', shadow: { color: '#000000', offsetX: 3, offsetY: 3 }, cy: 0.5, sizeFrac: 0.1 },
+    ],
+  },
+  {
+    key: 'minimal-line',
+    name: 'Minimal',
+    lines: [{ text: 'less is more', fontKey: 'montserrat', fill: '#1a1a1a', cy: 0.5, sizeFrac: 0.06, letterSpacing: 10 }],
+  },
+  {
+    key: 'party',
+    name: 'Party',
+    lines: [
+      { text: 'HAPPY', fontKey: 'lobster', fill: '#db2777', cy: 0.42, sizeFrac: 0.12 },
+      { text: 'BIRTHDAY', fontKey: 'lobster', fill: '#7c3aed', cy: 0.58, sizeFrac: 0.1 },
+    ],
+  },
+];
+
+/** Alignment as glyph icons (the universal text-align pictures), not words. */
+const ALIGN_CHOICES: { key: TextAlign; aria: string; icon: React.ReactNode }[] = [
+  {
+    key: 'left',
+    aria: 'Align left',
+    icon: (
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
+        <path d="M4 6h16M4 12h10M4 18h13" />
+      </svg>
+    ),
+  },
+  {
+    key: 'center',
+    aria: 'Align center',
+    icon: (
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
+        <path d="M4 6h16M7 12h10M6 18h12" />
+      </svg>
+    ),
+  },
+  {
+    key: 'right',
+    aria: 'Align right',
+    icon: (
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden>
+        <path d="M4 6h16M10 12h10M7 18h13" />
+      </svg>
+    ),
+  },
+];
 
 /**
  * Every design object on the canvas is tagged with its kind and the print area it
@@ -388,7 +683,7 @@ const TEXT_SWATCHES = ['#1a1a1a', '#ffffff', '#cf3f22', '#1d4ed8', '#047857', '#
  * (Fabric's own fontFamily holds the CSS family name).
  */
 type DesignedObject = FabricObject & {
-  kind?: 'image' | 'text';
+  kind?: 'image' | 'text' | 'shape';
   assetId?: string;
   printAreaKey?: string;
   fontKey?: string;
@@ -396,6 +691,8 @@ type DesignedObject = FabricObject & {
   textDirection?: TextDirection;
   /** v1.9 tiling fill (image objects); the preview rect is rebuilt from this. */
   pattern?: ImagePattern;
+  /** v2.7 vector shape silhouette ('rect' | 'circle' | 'star') for shape objects. */
+  shapeKind?: ShapeKind;
 };
 
 /** Non-interactive area-sized rect carrying the live pattern preview for one image. */
@@ -439,7 +736,7 @@ interface Status {
 }
 
 interface SelectionReadout {
-  kind: 'image' | 'text';
+  kind: 'image' | 'text' | 'shape';
   x: number;
   y: number;
   width: number;
@@ -474,6 +771,13 @@ interface SelectionReadout {
     /** v1.8 arc sweep in degrees; null = straight. */
     arc: number | null;
   } | null;
+  /** Shape styling, present when kind === 'shape'. */
+  shape: {
+    shapeKind: ShapeKind;
+    fill: string;
+    /** v2.7 outline stroke; null = off. */
+    stroke: ShapeStroke | null;
+  } | null;
 }
 
 /** One short phrase per quality level; advisory voice, never a hard stop. */
@@ -492,6 +796,9 @@ export function EditorClient({
 }) {
   const router = useRouter();
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
+  const stageWrapRef = useRef<HTMLDivElement | null>(null);
+  /** Workspace section; the fullscreen target (carries canvas + zoom widget). */
+  const stageSectionRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<Canvas | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const boundaryRef = useRef<Rect | null>(null);
@@ -559,6 +866,8 @@ export function EditorClient({
 
   /** View zoom multiplier over the fit zoom (1 = product fits the stage). */
   const [viewZoom, setViewZoom] = useState(1);
+  /** True while the workspace section owns the browser fullscreen. */
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   /** Placement overview (v2.0): grid of every print side with its current ink. */
   const [overviewOpen, setOverviewOpen] = useState(false);
@@ -568,6 +877,16 @@ export function EditorClient({
 
   /** Local mirror of the selected arc text's wording, for the panel input. */
   const [arcWording, setArcWording] = useState('');
+  /** Local mirror of the selected normal text's wording, for the panel input. */
+  const [textWording, setTextWording] = useState('');
+  /** Text panel "Advanced" disclosure; off = beginner-clean (visual controls only). */
+  const [textAdvanced, setTextAdvanced] = useState(false);
+  /** Recently used text colors (most-recent first), for quick reuse across objects. */
+  const [recentColors, setRecentColors] = useState<string[]>([]);
+  const pushRecentColor = useCallback((color: string) => {
+    const c = color.toLowerCase();
+    setRecentColors((prev) => [c, ...prev.filter((p) => p !== c)].slice(0, 8));
+  }, []);
 
   const activeArea = useMemo(
     () => template.printAreas.find((a) => a.key === activeAreaKey),
@@ -915,7 +1234,9 @@ export function EditorClient({
       // user is browsing the layers list (selecting from there must not yank the
       // panel away).
       if (toolRef.current !== 'layers') {
-        setTool(designed.kind === 'text' ? 'text' : 'uploads');
+        setTool(
+          designed.kind === 'text' ? 'text' : designed.kind === 'shape' ? 'shapes' : 'uploads',
+        );
       }
       // DPI is image-only: text is vector-like and rerenders sharp at any size.
       const quality = designed.kind === 'image' ? qualityOf(designed) : null;
@@ -981,6 +1302,17 @@ export function EditorClient({
               arc: null,
             }
           : null;
+      const shape =
+        designed.kind === 'shape'
+          ? {
+              shapeKind: designed.shapeKind ?? ('rect' as ShapeKind),
+              fill: typeof designed.fill === 'string' ? (designed.fill as string) : SHAPE_DEFAULTS.fill,
+              stroke:
+                typeof designed.stroke === 'string' && (designed.strokeWidth ?? 0) > 0
+                  ? { color: designed.stroke as string, width: designed.strokeWidth ?? 0 }
+                  : null,
+            }
+          : null;
       setSelection({
         kind: designed.kind,
         x: Math.round(designed.left ?? 0),
@@ -994,6 +1326,7 @@ export function EditorClient({
         physical,
         pattern: designed.kind === 'image' ? (designed.pattern ?? null) : null,
         text,
+        shape,
       });
     },
     [qualityOf, ppiByKey],
@@ -1120,6 +1453,46 @@ export function EditorClient({
   );
 
   /**
+   * Builds a tagged vector shape (v2.7). strokeUniform keeps the stroke a constant
+   * canvas px under scaling, so the stored stroke width is exactly the contract px
+   * and getScaledWidth/Height are the stroke-inclusive box the server expects.
+   * Side + corner handles are kept (rect/ellipse are usefully non-square); the
+   * star uses the SHARED starPolygonPoints so the editor and server silhouettes
+   * are identical.
+   */
+  const makeDesignedShape = useCallback(
+    (
+      shape: ShapeKind,
+      areaKey: string,
+      props: { width: number; height: number; fill: string; stroke?: ShapeStroke },
+    ): DesignedObject => {
+      const common = {
+        originX: 'center' as const,
+        originY: 'center' as const,
+        fill: props.fill,
+        strokeUniform: true,
+        ...(props.stroke
+          ? { stroke: props.stroke.color, strokeWidth: props.stroke.width }
+          : { strokeWidth: 0 }),
+      };
+      let obj: DesignedObject;
+      if (shape === 'rect') {
+        obj = new Rect({ ...common, width: props.width, height: props.height }) as DesignedObject;
+      } else if (shape === 'circle') {
+        obj = new Ellipse({ ...common, rx: props.width / 2, ry: props.height / 2 }) as DesignedObject;
+      } else {
+        obj = new Polygon(starPolygonPoints(props.width, props.height), common) as DesignedObject;
+      }
+      applySelectionStyle(obj);
+      obj.kind = 'shape';
+      obj.shapeKind = shape;
+      obj.printAreaKey = areaKey;
+      return obj;
+    },
+    [],
+  );
+
+  /**
    * Rebuilds one stored image object on the canvas (reopen and undo/redo paths).
    * Async (network image); checks the canvas is still current before adding.
    */
@@ -1168,6 +1541,42 @@ export function EditorClient({
         });
     },
     [refreshAreaCounts],
+  );
+
+  /**
+   * Rebuilds one stored vector shape on the canvas (reopen and undo/redo paths).
+   * Synchronous (no network). The stored box is stroke-inclusive, so the path is
+   * rebuilt at box minus stroke and strokeUniform re-adds the stroke; getScaledWidth
+   * then equals the stored box exactly, mirroring the server's inset-by-stroke/2.
+   */
+  const restoreShapeObject = useCallback(
+    (saved: Extract<DesignObject, { type: 'shape' }>, areaKey: string): void => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const sw = saved.stroke?.width ?? 0;
+      const width = Math.max(1, saved.width - sw);
+      const height = Math.max(1, saved.height - sw);
+      const mine = areaKey === activeAreaKeyRef.current;
+      const obj = makeDesignedShape(saved.shape, areaKey, {
+        width,
+        height,
+        fill: saved.fill,
+        ...(saved.stroke ? { stroke: saved.stroke } : {}),
+      });
+      obj.set({
+        left: saved.x,
+        top: saved.y,
+        angle: saved.rotation,
+        visible: mine,
+        evented: mine,
+        selectable: mine,
+      });
+      obj.setCoords();
+      canvas.add(obj);
+      canvas.requestRenderAll();
+      refreshAreaCounts();
+    },
+    [makeDesignedShape, refreshAreaCounts],
   );
 
   /**
@@ -1402,7 +1811,9 @@ export function EditorClient({
           pending.push(
             saved.type === 'text'
               ? restoreTextObject(saved, placement.printAreaKey)
-              : restoreImageObject(saved, placement.printAreaKey),
+              : saved.type === 'shape'
+                ? Promise.resolve(restoreShapeObject(saved, placement.printAreaKey))
+                : restoreImageObject(saved, placement.printAreaKey),
           );
         }
       }
@@ -1629,6 +2040,38 @@ export function EditorClient({
     canvas.setViewportTransform([z, 0, 0, z, offsetX, offsetY]);
     canvas.requestRenderAll();
   }, [canvasReady, viewZoom, zoom, stageHeight, template.canvasWidth, template.canvasHeight]);
+
+  // ---- wheel zoom: Ctrl/Cmd + wheel over the stage (the design-tool standard) ----
+  // Plain wheel is left alone; only the modifier zooms, so it never hijacks a
+  // scroll. Non-passive listener so preventDefault stops the page from zooming.
+  useEffect(() => {
+    const el = stageWrapRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * 0.0015); // smooth, direction-correct
+      setViewZoom((v) => Math.min(VIEW_ZOOM_MAX, Math.max(VIEW_ZOOM_MIN, v * factor)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [canvasReady]);
+
+  // ---- fullscreen workspace: blow the stage up to fill the screen ----
+  // Separate from view zoom: fullscreen gives ROOM, the reset button gives a
+  // 1:1 fit. The state mirrors the browser so Esc (native exit) updates the icon.
+  const toggleFullscreen = useCallback(() => {
+    const el = stageSectionRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void el.requestFullscreen?.();
+  }, []);
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
 
   // ---- area switch: swap view images + boundary, toggle object visibility ----
   useEffect(() => {
@@ -2099,8 +2542,77 @@ export function EditorClient({
     markMutated();
     setStatus({
       tone: 'success',
-      message: `Text added to ${area.name}. Double-click it to edit the wording.`,
+      message: `Text added to ${area.name}. Type in the Wording field to change it.`,
     });
+  };
+
+  /** Adds a vector shape centered in the active area at ~40% of its short side. */
+  const handleAddShape = (shape: ShapeKind) => {
+    const canvas = canvasRef.current;
+    const area = activeArea;
+    if (!canvas || !area) return;
+    const size = Math.round(Math.min(area.width, area.height) * 0.4);
+    const obj = makeDesignedShape(shape, area.key, {
+      width: size,
+      height: size,
+      fill: SHAPE_DEFAULTS.fill,
+    });
+    obj.set({ left: area.x + area.width / 2, top: area.y + area.height / 2 });
+    obj.setCoords();
+    fitToPrintArea(obj);
+    canvas.add(obj);
+    canvas.setActiveObject(obj);
+    canvas.requestRenderAll();
+    readSelection(obj);
+    refreshAreaCounts();
+    markMutated();
+    const label = SHAPE_CHOICES.find((c) => c.key === shape)?.label ?? 'Shape';
+    setStatus({ tone: 'success', message: `${label} added to ${area.name}.` });
+  };
+
+  /**
+   * Drops a starter template's lines onto the active side as editable text objects.
+   * One history step (a single markMutated after all lines), positioned by the
+   * template's area fractions and fit to the print area.
+   */
+  const applyTemplate = async (tpl: DesignTemplate) => {
+    const canvas = canvasRef.current;
+    const area = activeArea;
+    if (!canvas || !area) return;
+    try {
+      await ensureEditorFonts();
+    } catch {
+      setStatus({ tone: 'error', message: 'Fonts could not be loaded. Is the API running?' });
+      return;
+    }
+    if (canvasRef.current !== canvas) return;
+    let last: DesignedText | null = null;
+    for (const line of tpl.lines) {
+      const fontSize = Math.min(
+        Math.max(Math.round(line.sizeFrac * area.height), FONT_SIZE_MIN),
+        FONT_SIZE_MAX,
+      );
+      const obj = makeDesignedText(line.text, area.key, {
+        fontKey: line.fontKey,
+        fontSize,
+        color: line.fill,
+        align: line.align ?? 'center',
+        outline: line.outline,
+        shadow: line.shadow,
+        letterSpacing: line.letterSpacing,
+      });
+      obj.set({ left: area.x + area.width / 2, top: area.y + line.cy * area.height });
+      obj.setCoords();
+      fitToPrintArea(obj);
+      canvas.add(obj);
+      last = obj;
+    }
+    if (last) canvas.setActiveObject(last);
+    canvas.requestRenderAll();
+    readSelection(last);
+    refreshAreaCounts();
+    markMutated();
+    setStatus({ tone: 'success', message: `Added "${tpl.name}". Tap any line to edit it.` });
   };
 
   /** Applies a styling change to the selected text object and re-fits it. */
@@ -2120,16 +2632,137 @@ export function EditorClient({
     [clampTextScale, fitToPrintArea, readSelection, markMutated],
   );
 
+  /** Applies a styling change to the selected shape object and re-fits it. */
+  const updateActiveShape = useCallback(
+    (mutate: (o: DesignedObject) => void) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'shape') return;
+      mutate(active);
+      active.setCoords();
+      fitToPrintArea(active);
+      canvas.requestRenderAll();
+      readSelection(active);
+      markMutated();
+    },
+    [fitToPrintArea, readSelection, markMutated],
+  );
+
+  /** Sets the shape fill color (swatch or custom). */
+  const applyShapeFill = useCallback(
+    (color: string) => updateActiveShape((o) => o.set({ fill: color })),
+    [updateActiveShape],
+  );
+
+  /** Applies a one-tap stroke look to the selected shape (null = remove). */
+  const applyShapeStrokePreset = useCallback(
+    (stroke: ShapeStroke | null) =>
+      updateActiveShape((o) =>
+        stroke
+          ? o.set({ stroke: stroke.color, strokeWidth: stroke.width, strokeUniform: true })
+          : o.set({ stroke: undefined, strokeWidth: 0 }),
+      ),
+    [updateActiveShape],
+  );
+
+  /** Fine-tunes the selected shape's stroke color (keeps a visible width). */
+  const setShapeStrokeColor = useCallback(
+    (color: string) =>
+      updateActiveShape((o) =>
+        o.set({
+          stroke: color,
+          strokeUniform: true,
+          strokeWidth: Math.max(o.strokeWidth ?? 0, SHAPE_STROKE_WIDTH_MIN),
+        }),
+      ),
+    [updateActiveShape],
+  );
+
+  /** Fine-tunes the selected shape's stroke width within the contract bounds. */
+  const setShapeStrokeWidth = useCallback(
+    (width: number) => {
+      const w = Math.min(Math.max(Math.round(width), SHAPE_STROKE_WIDTH_MIN), SHAPE_STROKE_WIDTH_MAX);
+      updateActiveShape((o) =>
+        o.set({
+          strokeWidth: w,
+          strokeUniform: true,
+          stroke: typeof o.stroke === 'string' ? o.stroke : '#000000',
+        }),
+      );
+    },
+    [updateActiveShape],
+  );
+
   /** The contextual tool follows the selection; no selection, no tool panel. */
   useEffect(() => {
     if (!selection) setObjectTool(null);
   }, [selection]);
 
-  /** Sync the arc wording input to the active arc-text selection. */
+  /** Sync the wording inputs to the active text selection (arc vs normal). */
   useEffect(() => {
     const active = canvasRef.current?.getActiveObject() as DesignedObject | undefined;
     if (isArcText(active)) setArcWording(active.arcProps.text);
+    else if (active?.kind === 'text') setTextWording((active as DesignedText).text ?? '');
   }, [selection]);
+
+  /** Replaces the wording of the selected normal text from the panel input. */
+  const applyTextWording = useCallback(() => {
+    const next = textWording.replace(/\s+$/, '') || 'Your text';
+    setTextWording(next); // keep the field in sync with the normalized canvas text
+    updateActiveText((t) => t.set({ text: next }));
+  }, [textWording, updateActiveText]);
+
+  /** Applies a one-tap outline look (null = remove). Outline = Fabric stroke pair. */
+  const applyOutlinePreset = useCallback(
+    (outline: TextOutline | null) => {
+      updateActiveText((t) =>
+        outline
+          ? t.set({
+              stroke: outline.color,
+              strokeWidth: outline.width,
+              paintFirst: 'stroke',
+              strokeLineJoin: 'round',
+            })
+          : t.set({ stroke: undefined, strokeWidth: 0 }),
+      );
+    },
+    [updateActiveText],
+  );
+
+  /** Applies a full one-tap text "look" (font + color + outline + shadow + spacing). */
+  const applyTextStylePreset = useCallback(
+    (p: TextStylePreset) => {
+      const def = fontDefinitionOf(p.fontKey) ?? FONT_WHITELIST[0];
+      updateActiveText((t) => {
+        t.fontKey = def.key;
+        const effective = (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1);
+        t.set({
+          fontFamily: def.family,
+          fill: p.fill,
+          charSpacing: ((p.letterSpacing ?? 0) * 1000) / effective,
+          ...(p.outline
+            ? { stroke: p.outline.color, strokeWidth: p.outline.width, paintFirst: 'stroke' as const, strokeLineJoin: 'round' as const }
+            : { stroke: undefined, strokeWidth: 0 }),
+        });
+        t.shadow = p.shadow
+          ? new Shadow({ color: p.shadow.color, offsetX: p.shadow.offsetX, offsetY: p.shadow.offsetY, blur: 0 })
+          : null;
+      });
+    },
+    [updateActiveText],
+  );
+
+  /** Applies a one-tap shadow look (null = remove). Hard shadow, blur 0 per contract. */
+  const applyShadowPreset = useCallback(
+    (shadow: TextShadow | null) => {
+      updateActiveText((t) => {
+        t.shadow = shadow
+          ? new Shadow({ color: shadow.color, offsetX: shadow.offsetX, offsetY: shadow.offsetY, blur: 0 })
+          : null;
+      });
+    },
+    [updateActiveText],
+  );
 
   /**
    * Applies a geometry change to the selected object (any kind), then re-fits it
@@ -2351,6 +2984,41 @@ export function EditorClient({
     [updateActiveText],
   );
 
+  /** Sets text size from either the slider or the number; one path for both. */
+  const applyFontSize = useCallback(
+    (raw: number) => {
+      if (!Number.isFinite(raw)) return;
+      const clamped = Math.min(Math.max(raw, FONT_SIZE_MIN), FONT_SIZE_MAX);
+      const active = canvasRef.current?.getActiveObject() as DesignedObject | undefined;
+      if (isArcText(active)) {
+        setArcProps({ fontSize: clamped });
+        return;
+      }
+      // Reset any interactive scale so the chosen size IS the size.
+      updateActiveText((t) => t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 }));
+    },
+    [setArcProps, updateActiveText],
+  );
+
+  /** Sets letter spacing (canvas px) from either the slider or the number. */
+  const applyLetterSpacing = useCallback(
+    (raw: number) => {
+      if (!Number.isFinite(raw)) return;
+      const clamped = Math.min(Math.max(raw, LETTER_SPACING_MIN), LETTER_SPACING_MAX);
+      const active = canvasRef.current?.getActiveObject() as DesignedObject | undefined;
+      if (isArcText(active)) {
+        setArcProps({ letterSpacing: clamped });
+        return;
+      }
+      updateActiveText((t) => {
+        // Target px at the current effective size -> em-based charSpacing.
+        const effective = (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1);
+        t.set({ charSpacing: (clamped * 1000) / effective });
+      });
+    },
+    [setArcProps, updateActiveText],
+  );
+
   /**
    * Swaps the selected text between IText (plain) and Textbox (wrap-in-box),
    * preserving text, font, size, color, align, direction, and center position.
@@ -2516,6 +3184,30 @@ export function EditorClient({
           height: t.getScaledHeight(),
           rotation: (t.angle ?? 0) % 360,
         };
+      } else if (obj.kind === 'shape') {
+        // strokeUniform keeps strokeWidth a constant canvas px (no scale bake), and
+        // getScaledWidth/Height already include it: the stored box is stroke-inclusive.
+        const stroke =
+          typeof obj.stroke === 'string' && (obj.strokeWidth ?? 0) > 0
+            ? {
+                color: obj.stroke,
+                width: Math.min(
+                  Math.max(obj.strokeWidth ?? 1, SHAPE_STROKE_WIDTH_MIN),
+                  SHAPE_STROKE_WIDTH_MAX,
+                ),
+              }
+            : undefined;
+        serialized = {
+          type: 'shape',
+          shape: obj.shapeKind ?? 'rect',
+          fill: typeof obj.fill === 'string' ? obj.fill : SHAPE_DEFAULTS.fill,
+          ...(stroke ? { stroke } : {}),
+          x: obj.left ?? 0,
+          y: obj.top ?? 0,
+          width: obj.getScaledWidth(),
+          height: obj.getScaledHeight(),
+          rotation: (obj.angle ?? 0) % 360,
+        };
       } else if (obj.assetId) {
         serialized = {
           type: 'image',
@@ -2582,7 +3274,9 @@ export function EditorClient({
             pending.push(
               saved.type === 'text'
                 ? restoreTextObject(saved, placement.printAreaKey)
-                : restoreImageObject(saved, placement.printAreaKey),
+                : saved.type === 'shape'
+                  ? Promise.resolve(restoreShapeObject(saved, placement.printAreaKey))
+                  : restoreImageObject(saved, placement.printAreaKey),
             );
           }
         }
@@ -2593,7 +3287,7 @@ export function EditorClient({
         restoringRef.current = false;
       }
     },
-    [designedObjects, restoreImageObject, restoreTextObject, refreshAreaCounts],
+    [designedObjects, restoreImageObject, restoreShapeObject, restoreTextObject, refreshAreaCounts],
   );
 
   const undo = useCallback(async () => {
@@ -2856,20 +3550,130 @@ export function EditorClient({
           </span>
         )}
       </div>
+      {selection.shape && (
+        <div className="text-panel" data-testid="shape-panel">
+          <p className="text-panel__hint">Pick a fill and an optional outline.</p>
+          <div className="text-panel__field">
+            <span className="text-panel__label">Fill</span>
+            <div className="text-panel__swatches">
+              {TEXT_SWATCHES.map((swatch) => (
+                <button
+                  key={swatch}
+                  type="button"
+                  className="text-panel__swatch"
+                  data-testid={`shape-fill-${swatch.slice(1)}`}
+                  style={{ background: swatch }}
+                  aria-label={`Fill ${swatch}`}
+                  aria-pressed={selection.shape!.fill.toLowerCase() === swatch.toLowerCase()}
+                  onClick={() => {
+                    pushRecentColor(swatch);
+                    applyShapeFill(swatch);
+                  }}
+                />
+              ))}
+              <input
+                type="color"
+                data-testid="shape-fill-input"
+                value={selection.shape.fill}
+                onChange={(e) => {
+                  pushRecentColor(e.target.value);
+                  applyShapeFill(e.target.value);
+                }}
+              />
+            </div>
+          </div>
+          <div className="text-panel__field" role="group" aria-label="Outline">
+            <span className="text-panel__label">Outline</span>
+            <div className="fx-row">
+              {SHAPE_STROKE_PRESETS.map((preset) => {
+                const cur = selection.shape!.stroke;
+                const active = preset.stroke
+                  ? Boolean(cur) &&
+                    cur!.color.toLowerCase() === preset.stroke.color.toLowerCase() &&
+                    Math.round(cur!.width) === preset.stroke.width
+                  : !cur;
+                return (
+                  <button
+                    key={preset.key}
+                    type="button"
+                    data-testid={`fx-shape-stroke-${preset.key}`}
+                    aria-pressed={active}
+                    className={active ? 'fx-chip fx-chip--active' : 'fx-chip'}
+                    onClick={() => applyShapeStrokePreset(preset.stroke)}
+                  >
+                    <span
+                      className="fx-chip__preview"
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    >
+                      <span
+                        style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: 4,
+                          background: selection.shape!.fill,
+                          border: preset.stroke
+                            ? `3px solid ${preset.stroke.color}`
+                            : '1px dashed #9ca3af',
+                          boxSizing: 'border-box',
+                        }}
+                      />
+                    </span>
+                    <span className="fx-chip__label">{preset.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {selection.shape.stroke && (
+            <div
+              className="text-panel__field"
+              role="group"
+              aria-label="Outline width"
+              data-testid="shape-stroke-tune"
+            >
+              <span className="text-panel__label">Outline width</span>
+              <div className="fx-slider">
+                <span className="fx-slider__hint" aria-hidden>
+                  |
+                </span>
+                <input
+                  type="range"
+                  className="fx-slider__range"
+                  data-testid="shape-stroke-width"
+                  min={SHAPE_STROKE_WIDTH_MIN}
+                  max={SHAPE_STROKE_WIDTH_MAX}
+                  value={Math.round(selection.shape.stroke.width)}
+                  aria-label="Outline width"
+                  onChange={(e) => setShapeStrokeWidth(Number(e.target.value))}
+                />
+                <span className="fx-slider__hint fx-slider__hint--big" aria-hidden>
+                  |
+                </span>
+                <input
+                  type="color"
+                  data-testid="shape-stroke-color"
+                  value={selection.shape.stroke.color}
+                  onChange={(e) => setShapeStrokeColor(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {selection.text && (
         <div className="text-panel" data-testid="text-panel">
           <p className="text-panel__hint">
             {selection.text.arc !== null
               ? 'Edit the curved wording in the field below.'
-              : 'Double-click the text on the canvas to edit the wording.'}
+              : 'Type below. The design updates as you type. Enter starts a new line.'}
           </p>
-          {selection.text.arc !== null && (
+          {selection.text.arc !== null ? (
             <label className="text-panel__field">
               Wording
               <input
                 type="text"
                 data-testid="arc-text-input"
-                value={selection.text.arc !== null ? arcWording : ''}
+                value={arcWording}
                 onChange={(e) => setArcWording(e.target.value)}
                 onBlur={() => {
                   const next = arcWording.trim() || 'Your text';
@@ -2880,35 +3684,136 @@ export function EditorClient({
                 }}
               />
             </label>
+          ) : (
+            <label className="text-panel__field">
+              Wording
+              <textarea
+                rows={3}
+                data-testid="text-wording-input"
+                value={textWording}
+                onChange={(e) => {
+                  // Live WYSIWYG: the canvas mirrors every keystroke, including
+                  // spaces and newlines (Enter), with no apply/preview/blur step.
+                  // Empty is allowed mid-edit (zero-width box); blur normalizes it
+                  // back to the 'Your text' fallback.
+                  const raw = e.target.value;
+                  setTextWording(raw);
+                  updateActiveText((t) => t.set({ text: raw }));
+                }}
+                onBlur={applyTextWording}
+              />
+            </label>
           )}
-          <label className="text-panel__field">
-            Font
-            <select
-              data-testid="text-font-select"
-              value={selection.text.fontKey}
-              onChange={(e) => {
-                const key = e.target.value;
-                const family = fontDefinitionOf(key)?.family;
-                if (!family) return;
-                if (selection.text!.arc !== null) {
-                  setArcProps({ fontKey: key });
-                  return;
-                }
-                updateActiveText((t) => {
-                  t.fontKey = key;
-                  t.set({ fontFamily: family });
-                });
-              }}
-            >
-              {FONT_WHITELIST.map((font) => (
-                <option key={font.key} value={font.key} style={{ fontFamily: font.family }}>
-                  {font.family}
-                </option>
-              ))}
-            </select>
-          </label>
+          {selection.text.arc === null && (
+            <div className="text-panel__field" role="group" aria-label="Text styles">
+              <span className="text-panel__label">Styles</span>
+              <p className="text-panel__sub">One tap for a ready-made look.</p>
+              <div className="fx-row fx-row--styles">
+                {TEXT_STYLE_PRESETS.map((p) => {
+                  const def = fontDefinitionOf(p.fontKey);
+                  return (
+                    <button
+                      key={p.key}
+                      type="button"
+                      data-testid={`text-style-${p.key}`}
+                      className="fx-chip"
+                      title={p.label}
+                      onClick={() => applyTextStylePreset(p)}
+                    >
+                      <span
+                        className="fx-chip__preview"
+                        style={{
+                          fontFamily: def?.family,
+                          color: p.fill,
+                          ...(p.outline
+                            ? { WebkitTextStroke: `${(p.outline.width * 0.4).toFixed(1)}px ${p.outline.color}` }
+                            : {}),
+                          ...(p.shadow
+                            ? { textShadow: `${(p.shadow.offsetX * 0.5).toFixed(1)}px ${(p.shadow.offsetY * 0.5).toFixed(1)}px 0 ${p.shadow.color}` }
+                            : {}),
+                        }}
+                      >
+                        Aa
+                      </span>
+                      <span className="fx-chip__label">{p.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <div className="text-panel__field">
-            Color
+            Font
+            <div
+              className="font-picker"
+              data-testid="text-font-select"
+              role="radiogroup"
+              aria-label="Font"
+            >
+              {FONT_CATEGORY_ORDER.map((cat) => {
+                const fonts = FONT_WHITELIST.filter((f) => f.category === cat);
+                if (fonts.length === 0) return null;
+                // Preview each font with the user's own first line so they see their
+                // real text in the face; fall back to the family name when empty.
+                const sample = (textWording.split('\n')[0] ?? '').trim().slice(0, 16);
+                return (
+                  <div key={cat} className="font-picker__group">
+                    <p className="font-picker__cat">{cat}</p>
+                    {fonts.map((font) => {
+                      const active = selection.text!.fontKey === font.key;
+                      return (
+                        <button
+                          key={font.key}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          data-testid={`font-pick-${font.key}`}
+                          className={`font-picker__item${active ? ' font-picker__item--active' : ''}`}
+                          onClick={() => {
+                            if (selection.text!.arc !== null) {
+                              setArcProps({ fontKey: font.key });
+                              return;
+                            }
+                            updateActiveText((t) => {
+                              t.fontKey = font.key;
+                              t.set({ fontFamily: font.family });
+                            });
+                          }}
+                        >
+                          <span className="font-picker__sample" style={{ fontFamily: font.family }}>
+                            {sample || font.family}
+                          </span>
+                          <span className="font-picker__name">{font.family}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="text-panel__field">
+            <span className="text-panel__label">Color</span>
+            {recentColors.length > 0 && (
+              <div className="text-panel__swatches text-panel__swatches--recent" aria-label="Recent colors">
+                {recentColors.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className="text-panel__swatch"
+                    data-testid={`text-recent-${c.slice(1)}`}
+                    style={{ background: c }}
+                    aria-label={`Recent color ${c}`}
+                    onClick={() => {
+                      pushRecentColor(c);
+                      selection.text!.arc !== null
+                        ? setArcProps({ color: c })
+                        : updateActiveText((t) => t.set({ fill: c }));
+                    }}
+                  />
+                ))}
+              </div>
+            )}
             <div className="text-panel__swatches">
               {TEXT_SWATCHES.map((swatch) => (
                 <button
@@ -2918,11 +3823,12 @@ export function EditorClient({
                   data-testid={`text-swatch-${swatch.slice(1)}`}
                   style={{ background: swatch }}
                   aria-label={`Text color ${swatch}`}
-                  onClick={() =>
+                  onClick={() => {
+                    pushRecentColor(swatch);
                     selection.text!.arc !== null
                       ? setArcProps({ color: swatch })
-                      : updateActiveText((t) => t.set({ fill: swatch }))
-                  }
+                      : updateActiveText((t) => t.set({ fill: swatch }));
+                  }}
                 />
               ))}
               <input
@@ -2931,6 +3837,7 @@ export function EditorClient({
                 value={selection.text.color}
                 onChange={(e) => {
                   const color = e.target.value; // native input always emits #rrggbb
+                  pushRecentColor(color);
                   if (selection.text!.arc !== null) {
                     setArcProps({ color });
                     return;
@@ -2940,105 +3847,112 @@ export function EditorClient({
               />
             </div>
           </div>
-          <label className="text-panel__field">
-            Size
-            <input
-              type="number"
-              data-testid="text-size-input"
-              min={FONT_SIZE_MIN}
-              max={FONT_SIZE_MAX}
-              value={selection.text.fontSize}
-              onChange={(e) => {
-                const size = Number(e.target.value);
-                if (!Number.isFinite(size)) return;
-                const clamped = Math.min(Math.max(size, FONT_SIZE_MIN), FONT_SIZE_MAX);
-                if (selection.text!.arc !== null) {
-                  setArcProps({ fontSize: clamped });
-                  return;
-                }
-                updateActiveText((t) => {
-                  // Reset any interactive scale so the typed size IS the size.
-                  t.set({ fontSize: clamped, scaleX: 1, scaleY: 1 });
-                });
-              }}
-            />
-          </label>
-          <label className="text-panel__field">
-            Letter spacing
-            <input
-              type="number"
-              data-testid="text-letter-spacing-input"
-              min={LETTER_SPACING_MIN}
-              max={LETTER_SPACING_MAX}
-              value={Math.round(selection.text.letterSpacing)}
-              onChange={(e) => {
-                const px = Number(e.target.value);
-                if (!Number.isFinite(px)) return;
-                const clamped = Math.min(Math.max(px, LETTER_SPACING_MIN), LETTER_SPACING_MAX);
-                if (selection.text!.arc !== null) {
-                  setArcProps({ letterSpacing: clamped });
-                  return;
-                }
-                updateActiveText((t) => {
-                  // Target px at the current effective size -> em-based charSpacing.
-                  const effective = (t.fontSize ?? TEXT_DEFAULTS.fontSize) * (t.scaleY ?? 1);
-                  t.set({ charSpacing: (clamped * 1000) / effective });
-                });
-              }}
-            />
-          </label>
+          <div className="text-panel__field" role="group" aria-label="Text size">
+            <span className="text-panel__label">Size</span>
+            <div className="fx-slider">
+              <span className="fx-slider__hint" aria-hidden>A</span>
+              <input
+                type="range"
+                className="fx-slider__range"
+                data-testid="text-size-range"
+                min={FONT_SIZE_MIN}
+                max={200}
+                value={Math.min(Math.round(selection.text.fontSize), 200)}
+                aria-label="Text size"
+                onChange={(e) => applyFontSize(Number(e.target.value))}
+              />
+              <span className="fx-slider__hint fx-slider__hint--big" aria-hidden>A</span>
+              <input
+                type="number"
+                className="fx-slider__num"
+                data-testid="text-size-input"
+                min={FONT_SIZE_MIN}
+                max={FONT_SIZE_MAX}
+                value={Math.round(selection.text.fontSize)}
+                aria-label="Text size value"
+                onChange={(e) => applyFontSize(Number(e.target.value))}
+              />
+            </div>
+          </div>
+          <div className="text-panel__field" role="group" aria-label="Letter spacing">
+            <span className="text-panel__label">Spacing</span>
+            <div className="fx-slider">
+              <span className="fx-slider__hint" aria-hidden>AA</span>
+              <input
+                type="range"
+                className="fx-slider__range"
+                data-testid="text-letter-spacing-range"
+                min={LETTER_SPACING_MIN}
+                max={LETTER_SPACING_MAX}
+                value={Math.round(selection.text.letterSpacing)}
+                aria-label="Letter spacing"
+                onChange={(e) => applyLetterSpacing(Number(e.target.value))}
+              />
+              <span className="fx-slider__hint" aria-hidden>A&nbsp;A</span>
+              <input
+                type="number"
+                className="fx-slider__num"
+                data-testid="text-letter-spacing-input"
+                min={LETTER_SPACING_MIN}
+                max={LETTER_SPACING_MAX}
+                value={Math.round(selection.text.letterSpacing)}
+                aria-label="Letter spacing value"
+                onChange={(e) => applyLetterSpacing(Number(e.target.value))}
+              />
+            </div>
+          </div>
           <div className="text-panel__field" role="group" aria-label="Text alignment">
-            Align
-            <div className="text-panel__align">
-              {(['left', 'center', 'right'] as const).map((align) => (
+            <span className="text-panel__label">Align</span>
+            <div className="fx-icons">
+              {ALIGN_CHOICES.map((choice) => (
                 <button
-                  key={align}
+                  key={choice.key}
                   type="button"
-                  data-testid={`text-align-${align}`}
-                  className={
-                    selection.text?.align === align
-                      ? 'btn btn--ghost btn--small btn--active'
-                      : 'btn btn--ghost btn--small'
-                  }
+                  data-testid={`text-align-${choice.key}`}
+                  aria-pressed={selection.text?.align === choice.key}
+                  aria-label={choice.aria}
+                  title={choice.aria}
+                  className={selection.text?.align === choice.key ? 'fx-icon fx-icon--active' : 'fx-icon'}
                   onClick={() =>
                     selection.text!.arc !== null
-                      ? setArcProps({ align })
-                      : updateActiveText((t) => t.set({ textAlign: align }))
+                      ? setArcProps({ align: choice.key })
+                      : updateActiveText((t) => t.set({ textAlign: choice.key }))
                   }
                 >
-                  {align}
+                  {choice.icon}
                 </button>
               ))}
             </div>
           </div>
           <div className="text-panel__field" role="group" aria-label="Text curve">
-            Curve
-            <div className="text-panel__align">
+            <span className="text-panel__label">Curve</span>
+            <div className="fx-icons">
               <button
                 type="button"
                 data-testid="text-arc-none"
-                className={
-                  selection.text.arc === null
-                    ? 'btn btn--ghost btn--small btn--active'
-                    : 'btn btn--ghost btn--small'
-                }
+                aria-pressed={selection.text.arc === null}
+                aria-label="Straight text"
+                title="Straight"
+                className={selection.text.arc === null ? 'fx-icon fx-icon--active' : 'fx-icon'}
                 onClick={() => setArc(null)}
               >
-                none
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
+                  <path d="M5 9h14M5 15h9" />
+                </svg>
               </button>
               <button
                 type="button"
                 data-testid="text-arc-toggle"
-                className={
-                  selection.text.arc !== null
-                    ? 'btn btn--ghost btn--small btn--active'
-                    : 'btn btn--ghost btn--small'
-                }
+                aria-pressed={selection.text.arc !== null}
+                aria-label="Curved text"
+                title={selection.text.wrap ? 'Turn off Wrap (Advanced) to curve text' : 'Curved'}
                 disabled={selection.text.wrap}
-                title={selection.text.wrap ? 'Turn off wrap to curve text' : undefined}
+                className={selection.text.arc !== null ? 'fx-icon fx-icon--active' : 'fx-icon'}
                 onClick={() => setArc(selection.text!.arc ?? 90)}
               >
-                arc
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M4 15a8 8 0 0 1 16 0" />
+                </svg>
               </button>
             </div>
           </div>
@@ -3062,145 +3976,211 @@ export function EditorClient({
             </div>
           )}
           {selection.text.arc === null && (
-          <>
-          <div className="text-panel__field" role="group" aria-label="Text direction">
-            Direction
-            <div className="text-panel__align">
-              {(['auto', 'ltr', 'rtl'] as const).map((dir) => (
-                <button
-                  key={dir}
-                  type="button"
-                  data-testid={`text-direction-${dir}`}
-                  data-resolved={
-                    dir === 'auto' ? selection.text?.resolvedDirection : undefined
-                  }
-                  className={
-                    selection.text?.direction === dir
-                      ? 'btn btn--ghost btn--small btn--active'
-                      : 'btn btn--ghost btn--small'
-                  }
-                  onClick={() => setTextDirection(dir)}
+            <>
+              <div className="text-panel__field" role="group" aria-label="Outline">
+                <span className="text-panel__label">Outline</span>
+                <div className="fx-row">
+                  {OUTLINE_PRESETS.map((preset) => {
+                    const cur = selection.text!.outline;
+                    const active = preset.outline
+                      ? Boolean(cur) &&
+                        cur!.color === preset.outline.color &&
+                        Math.round(cur!.width) === preset.outline.width
+                      : !cur;
+                    return (
+                      <button
+                        key={preset.key}
+                        type="button"
+                        data-testid={`fx-outline-${preset.key}`}
+                        aria-pressed={active}
+                        className={active ? 'fx-chip fx-chip--active' : 'fx-chip'}
+                        onClick={() => applyOutlinePreset(preset.outline)}
+                      >
+                        <span
+                          className="fx-chip__preview"
+                          style={
+                            preset.outline
+                              ? {
+                                  WebkitTextStroke: `${(preset.outline.width * 0.45).toFixed(1)}px ${preset.outline.color}`,
+                                }
+                              : undefined
+                          }
+                        >
+                          Ag
+                        </span>
+                        <span className="fx-chip__label">{preset.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="text-panel__field" role="group" aria-label="Shadow">
+                <span className="text-panel__label">Shadow</span>
+                <div className="fx-row">
+                  {SHADOW_PRESETS.map((preset) => {
+                    const cur = selection.text!.shadow;
+                    const active = preset.shadow
+                      ? Boolean(cur) &&
+                        Math.round(cur!.offsetX) === preset.shadow.offsetX &&
+                        Math.round(cur!.offsetY) === preset.shadow.offsetY
+                      : !cur;
+                    return (
+                      <button
+                        key={preset.key}
+                        type="button"
+                        data-testid={`fx-shadow-${preset.key}`}
+                        aria-pressed={active}
+                        className={active ? 'fx-chip fx-chip--active' : 'fx-chip'}
+                        onClick={() => applyShadowPreset(preset.shadow)}
+                      >
+                        <span
+                          className="fx-chip__preview"
+                          style={
+                            preset.shadow
+                              ? {
+                                  textShadow: `${(preset.shadow.offsetX * 0.5).toFixed(1)}px ${(preset.shadow.offsetY * 0.5).toFixed(1)}px 0 ${preset.shadow.color}`,
+                                }
+                              : undefined
+                          }
+                        >
+                          Ag
+                        </span>
+                        <span className="fx-chip__label">{preset.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="text-panel__advanced-toggle"
+                data-testid="text-advanced-toggle"
+                aria-expanded={textAdvanced}
+                onClick={() => setTextAdvanced((v) => !v)}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="13"
+                  height="13"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                  style={{ transform: textAdvanced ? 'rotate(90deg)' : undefined, transition: 'transform 140ms ease' }}
                 >
-                  {dir === 'auto' ? `auto (${selection.text?.resolvedDirection})` : dir}
-                </button>
-              ))}
-            </div>
-          </div>
-          <label className="text-panel__field text-panel__wrap">
-            <span>
-              <input
-                type="checkbox"
-                data-testid="text-wrap-toggle"
-                checked={selection.text.wrap}
-                onChange={(e) => setTextWrap(e.target.checked)}
-              />{' '}
-              Wrap in box
-            </span>
-            <small>Side handles set the box width; text reflows inside it.</small>
-          </label>
-          <div className="text-panel__field text-panel__effect" data-testid="text-outline-section">
-            <label>
-              <input
-                type="checkbox"
-                data-testid="text-outline-toggle"
-                checked={Boolean(selection.text.outline)}
-                onChange={(e) =>
-                  updateActiveText((t) =>
-                    e.target.checked
-                      ? t.set({
-                          stroke: '#ffffff',
-                          strokeWidth: 4,
-                          paintFirst: 'stroke',
-                          strokeLineJoin: 'round',
-                        })
-                      : t.set({ stroke: undefined, strokeWidth: 0 }),
-                  )
-                }
-              />{' '}
-              Outline
-            </label>
-            {selection.text.outline && (
-              <div className="text-panel__effect-row">
-                <input
-                  type="color"
-                  data-testid="text-outline-color"
-                  value={selection.text.outline.color}
-                  onChange={(e) => {
-                    const color = e.target.value;
-                    updateActiveText((t) => t.set({ stroke: color }));
-                  }}
-                />
-                <input
-                  type="number"
-                  data-testid="text-outline-width"
-                  min={OUTLINE_WIDTH_MIN}
-                  max={OUTLINE_WIDTH_MAX}
-                  value={Math.round(selection.text.outline.width)}
-                  aria-label="Outline width"
-                  onChange={(e) => {
-                    const width = Number(e.target.value);
-                    if (!Number.isFinite(width)) return;
-                    const clamped = Math.min(Math.max(width, OUTLINE_WIDTH_MIN), OUTLINE_WIDTH_MAX);
-                    updateActiveText((t) => t.set({ strokeWidth: clamped }));
-                  }}
-                />
-              </div>
-            )}
-          </div>
-          <div className="text-panel__field text-panel__effect" data-testid="text-shadow-section">
-            <label>
-              <input
-                type="checkbox"
-                data-testid="text-shadow-toggle"
-                checked={Boolean(selection.text.shadow)}
-                onChange={(e) =>
-                  updateActiveText((t) => {
-                    t.shadow = e.target.checked
-                      ? new Shadow({ color: '#000000', offsetX: 4, offsetY: 4, blur: 0 })
-                      : null;
-                  })
-                }
-              />{' '}
-              Shadow
-            </label>
-            {selection.text.shadow && (
-              <div className="text-panel__effect-row">
-                <input
-                  type="color"
-                  data-testid="text-shadow-color"
-                  value={selection.text.shadow.color}
-                  onChange={(e) => {
-                    const color = e.target.value;
-                    updateActiveText((t) => {
-                      if (t.shadow) t.shadow.color = color;
-                    });
-                  }}
-                />
-                {(['offsetX', 'offsetY'] as const).map((axis) => (
-                  <input
-                    key={axis}
-                    type="number"
-                    data-testid={`text-shadow-${axis === 'offsetX' ? 'x' : 'y'}`}
-                    min={-SHADOW_OFFSET_MAX}
-                    max={SHADOW_OFFSET_MAX}
-                    // Non-null: this row only renders inside the shadow guard above;
-                    // TS just cannot see through the map callback.
-                    value={Math.round(selection.text!.shadow![axis])}
-                    aria-label={`Shadow ${axis}`}
-                    onChange={(e) => {
-                      const value = Number(e.target.value);
-                      if (!Number.isFinite(value)) return;
-                      const clamped = Math.min(Math.max(value, -SHADOW_OFFSET_MAX), SHADOW_OFFSET_MAX);
-                      updateActiveText((t) => {
-                        if (t.shadow) t.shadow[axis] = clamped;
-                      });
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-          </>
+                  <path d="M9 6l6 6-6 6" />
+                </svg>
+                Advanced
+              </button>
+              {textAdvanced && (
+                <div className="text-panel__advanced" data-testid="text-advanced">
+                  <div className="text-panel__field" role="group" aria-label="Text direction">
+                    <span className="text-panel__label">Direction</span>
+                    <div className="text-panel__align">
+                      {(['auto', 'ltr', 'rtl'] as const).map((dir) => (
+                        <button
+                          key={dir}
+                          type="button"
+                          data-testid={`text-direction-${dir}`}
+                          data-resolved={dir === 'auto' ? selection.text?.resolvedDirection : undefined}
+                          className={
+                            selection.text?.direction === dir
+                              ? 'btn btn--ghost btn--small btn--active'
+                              : 'btn btn--ghost btn--small'
+                          }
+                          onClick={() => setTextDirection(dir)}
+                        >
+                          {dir === 'auto' ? `auto (${selection.text?.resolvedDirection})` : dir}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="text-panel__field text-panel__wrap">
+                    <span>
+                      <input
+                        type="checkbox"
+                        data-testid="text-wrap-toggle"
+                        checked={selection.text.wrap}
+                        onChange={(e) => setTextWrap(e.target.checked)}
+                      />{' '}
+                      Wrap in box
+                    </span>
+                    <small>Side handles set the box width; text reflows inside it.</small>
+                  </label>
+                  {selection.text.outline && (
+                    <div className="text-panel__field text-panel__effect" data-testid="text-outline-section">
+                      <span className="text-panel__label">Outline color &amp; width</span>
+                      <div className="text-panel__effect-row">
+                        <input
+                          type="color"
+                          data-testid="text-outline-color"
+                          value={selection.text.outline.color}
+                          onChange={(e) => {
+                            const color = e.target.value;
+                            updateActiveText((t) => t.set({ stroke: color }));
+                          }}
+                        />
+                        <input
+                          type="number"
+                          data-testid="text-outline-width"
+                          min={OUTLINE_WIDTH_MIN}
+                          max={OUTLINE_WIDTH_MAX}
+                          value={Math.round(selection.text.outline.width)}
+                          aria-label="Outline width"
+                          onChange={(e) => {
+                            const width = Number(e.target.value);
+                            if (!Number.isFinite(width)) return;
+                            const clamped = Math.min(Math.max(width, OUTLINE_WIDTH_MIN), OUTLINE_WIDTH_MAX);
+                            updateActiveText((t) => t.set({ strokeWidth: clamped }));
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {selection.text.shadow && (
+                    <div className="text-panel__field text-panel__effect" data-testid="text-shadow-section">
+                      <span className="text-panel__label">Shadow color &amp; offset</span>
+                      <div className="text-panel__effect-row">
+                        <input
+                          type="color"
+                          data-testid="text-shadow-color"
+                          value={selection.text.shadow.color}
+                          onChange={(e) => {
+                            const color = e.target.value;
+                            updateActiveText((t) => {
+                              if (t.shadow) t.shadow.color = color;
+                            });
+                          }}
+                        />
+                        {(['offsetX', 'offsetY'] as const).map((axis) => (
+                          <input
+                            key={axis}
+                            type="number"
+                            data-testid={`text-shadow-${axis === 'offsetX' ? 'x' : 'y'}`}
+                            min={-SHADOW_OFFSET_MAX}
+                            max={SHADOW_OFFSET_MAX}
+                            // Non-null: this row only renders inside the shadow guard above;
+                            // TS just cannot see through the map callback.
+                            value={Math.round(selection.text!.shadow![axis])}
+                            aria-label={`Shadow ${axis}`}
+                            onChange={(e) => {
+                              const value = Number(e.target.value);
+                              if (!Number.isFinite(value)) return;
+                              const clamped = Math.min(Math.max(value, -SHADOW_OFFSET_MAX), SHADOW_OFFSET_MAX);
+                              updateActiveText((t) => {
+                                if (t.shadow) t.shadow[axis] = clamped;
+                              });
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           )}
           {selection.text.arc === null && selection.text.lineCount > TEXT_MAX_LINES && (
             <p
@@ -3293,15 +4273,25 @@ export function EditorClient({
           <button type="button" className="studio__mode-tab studio__mode-tab--active">
             Design
           </button>
-          {designId ? (
-            <Link className="studio__mode-tab" href={`/designs/${designId}`} data-testid="mode-mockups">
-              Mockups
-            </Link>
-          ) : (
-            <button type="button" className="studio__mode-tab" disabled title="Save the design first">
-              Mockups
-            </button>
-          )}
+          {/* Save clears the previous render, so this tab RENDERS then navigates
+              (same as the Generate button) instead of linking to an empty page.
+              Disabled until the design is saved with no pending edits. */}
+          <button
+            type="button"
+            className="studio__mode-tab"
+            data-testid="mode-mockups"
+            disabled={busy !== null || !designId || dirty}
+            title={
+              !designId
+                ? 'Save the design first'
+                : dirty
+                  ? 'Save your changes first'
+                  : 'Render and view the mockups'
+            }
+            onClick={() => void handleRender()}
+          >
+            {busy === 'render' ? 'Rendering...' : 'Mockups'}
+          </button>
         </div>
         <Link href="/designs" className="studio__close" aria-label="Close editor">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
@@ -3423,6 +4413,56 @@ export function EditorClient({
             </>
           )}
 
+          {tool === 'templates' && (
+            <>
+              <p className="studio__panel-title">Templates</p>
+              <p className="studio__panel-copy">
+                Start from a ready-made look on <b>{activeArea?.name ?? 'the active side'}</b>, then
+                edit any line.
+              </p>
+              <div className="template-gallery" data-testid="template-gallery">
+                {DESIGN_TEMPLATES.map((tpl) => (
+                  <button
+                    key={tpl.key}
+                    type="button"
+                    className="template-card"
+                    data-testid={`template-${tpl.key}`}
+                    disabled={busy !== null}
+                    title={tpl.name}
+                    onClick={() => void applyTemplate(tpl)}
+                  >
+                    <span className="template-card__preview" aria-hidden>
+                      {tpl.lines.map((line, i) => {
+                        const def = fontDefinitionOf(line.fontKey);
+                        return (
+                          <span
+                            key={i}
+                            className="template-card__line"
+                            style={{
+                              fontFamily: def?.family,
+                              color: line.fill,
+                              fontSize: `${Math.max(8, Math.round(line.sizeFrac * 150))}px`,
+                              letterSpacing: line.letterSpacing ? `${Math.min(line.letterSpacing / 8, 3)}px` : undefined,
+                              ...(line.outline
+                                ? { WebkitTextStroke: `${(line.outline.width * 0.3).toFixed(1)}px ${line.outline.color}` }
+                                : {}),
+                              ...(line.shadow
+                                ? { textShadow: `${(line.shadow.offsetX * 0.4).toFixed(1)}px ${(line.shadow.offsetY * 0.4).toFixed(1)}px 0 ${line.shadow.color}` }
+                                : {}),
+                            }}
+                          >
+                            {line.text}
+                          </span>
+                        );
+                      })}
+                    </span>
+                    <span className="template-card__name">{tpl.name}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
           {tool === 'uploads' && (
             <>
               <p className="studio__panel-title">Uploads</p>
@@ -3458,6 +4498,44 @@ export function EditorClient({
               >
                 Add text
               </button>
+              {selectionSection}
+            </>
+          )}
+
+          {tool === 'shapes' && (
+            <>
+              <p className="studio__panel-title">Shapes</p>
+              <p className="studio__panel-copy">
+                Drop a shape on <b>{activeArea?.name ?? 'the active side'}</b>, then set its color
+                below.
+              </p>
+              <div
+                data-testid="shape-gallery"
+                style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}
+              >
+                {SHAPE_CHOICES.map((choice) => (
+                  <button
+                    key={choice.key}
+                    type="button"
+                    className="btn btn--ghost"
+                    data-testid={`shape-add-${choice.key}`}
+                    disabled={busy !== null}
+                    onClick={() => handleAddShape(choice.key)}
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '12px 6px',
+                    }}
+                  >
+                    <span aria-hidden style={{ color: '#1d4ed8' }}>
+                      {SHAPE_GLYPHS[choice.key]}
+                    </span>
+                    {choice.label}
+                  </button>
+                ))}
+              </div>
               {selectionSection}
             </>
           )}
@@ -3516,11 +4594,13 @@ export function EditorClient({
                         }
                         onClick={() => selectLayer(obj)}
                       >
-                        {TOOL_ICONS[obj.kind === 'text' ? 'text' : 'uploads']}
+                        {TOOL_ICONS[obj.kind === 'text' ? 'text' : obj.kind === 'shape' ? 'shapes' : 'uploads']}
                         <span>
                           {obj.kind === 'text'
                             ? ((obj as DesignedText).text ?? 'Text').split('\n')[0]!.slice(0, 26) || 'Text'
-                            : 'Image'}
+                            : obj.kind === 'shape'
+                              ? (SHAPE_CHOICES.find((c) => c.key === obj.shapeKind)?.label ?? 'Shape')
+                              : 'Image'}
                         </span>
                       </button>
                     </li>
@@ -3537,6 +4617,7 @@ export function EditorClient({
         </aside>
 
         <section
+          ref={stageSectionRef}
           className="studio__stage"
           aria-label="Design workspace"
           onDragOver={handleStageDragOver}
@@ -3671,28 +4752,29 @@ export function EditorClient({
           {selection && objectTool === 'pattern' && (
             <div className="studio__object-panel" data-testid="object-panel-pattern">
               <p className="studio__object-panel-title">Pattern</p>
-              <div className="studio__align-row" role="group" aria-label="Pattern type">
-                {PATTERN_CHOICES.map((choice) => (
-                  <button
-                    key={choice.label}
-                    type="button"
-                    className={
-                      (selection.pattern?.type ?? null) === choice.key
-                        ? 'studio__context-tool studio__context-tool--active'
-                        : 'studio__context-tool'
-                    }
-                    data-testid={`pattern-type-${choice.key ?? 'none'}`}
-                    onClick={() =>
-                      setImagePattern(
-                        choice.key
-                          ? { type: choice.key, spacing: selection.pattern?.spacing ?? 0 }
-                          : null,
-                      )
-                    }
-                  >
-                    <span>{choice.label}</span>
-                  </button>
-                ))}
+              <div className="fx-row fx-row--pattern" role="group" aria-label="Pattern type">
+                {PATTERN_CHOICES.map((choice) => {
+                  const active = (selection.pattern?.type ?? null) === choice.key;
+                  return (
+                    <button
+                      key={choice.label}
+                      type="button"
+                      aria-pressed={active}
+                      className={active ? 'fx-chip fx-chip--active' : 'fx-chip'}
+                      data-testid={`pattern-type-${choice.key ?? 'none'}`}
+                      onClick={() =>
+                        setImagePattern(
+                          choice.key
+                            ? { type: choice.key, spacing: selection.pattern?.spacing ?? 0 }
+                            : null,
+                        )
+                      }
+                    >
+                      <span className="fx-chip__tile">{choice.icon}</span>
+                      <span className="fx-chip__label">{choice.label}</span>
+                    </button>
+                  );
+                })}
               </div>
               {selection.pattern && (
                 <div className="studio__rotate-row" style={{ marginTop: 10 }}>
@@ -3777,6 +4859,7 @@ export function EditorClient({
           )}
 
           <div
+            ref={stageWrapRef}
             className="studio__canvas-wrap"
             style={{ width: STAGE_WIDTH, height: stageHeight }}
             data-testid="editor-stage"
@@ -3811,13 +4894,32 @@ export function EditorClient({
             </button>
             <button
               type="button"
-              aria-label="Fit product to view"
+              aria-label="Reset to normal view"
+              title="Reset to normal view"
               disabled={viewZoom === 1}
               onClick={() => setViewZoom(1)}
             >
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+                <path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" />
               </svg>
+            </button>
+            <span className="studio__zoom-divider" aria-hidden />
+            <button
+              type="button"
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              aria-pressed={isFullscreen}
+              onClick={toggleFullscreen}
+            >
+              {isFullscreen ? (
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+                </svg>
+              )}
             </button>
           </div>
 
@@ -3878,9 +4980,11 @@ export function EditorClient({
           {placedAreas === 1 ? '' : 's'} · server validates every save per print area
         </p>
         <div className="studio__ctas">
+          {/* The accent highlight follows the next logical step: Save while there
+              are unsaved edits, then Generate once the design is saved & clean. */}
           <button
             type="button"
-            className="btn"
+            className={`btn${totalObjects > 0 && (designId === null || dirty) ? ' btn--accent' : ''}`}
             data-testid="save-design"
             disabled={busy !== null || totalObjects === 0 || (designId !== null && !dirty)}
             onClick={() => void handleSave()}
@@ -3889,11 +4993,17 @@ export function EditorClient({
           </button>
           <button
             type="button"
-            className="btn btn--accent"
+            className={`btn${Boolean(designId) && !dirty ? ' btn--accent' : ''}`}
             data-testid="generate-mockup"
             disabled={busy !== null || !designId || dirty}
             onClick={() => void handleRender()}
-            title={dirty && designId ? 'Save your changes first' : undefined}
+            title={
+              !designId
+                ? 'Save the design first to see mockups'
+                : dirty
+                  ? 'Save your changes first'
+                  : undefined
+            }
           >
             {busy === 'render' ? 'Rendering...' : 'Generate mockups'}
           </button>

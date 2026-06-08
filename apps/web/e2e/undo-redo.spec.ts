@@ -108,7 +108,7 @@ test('undo restores deleted text with its styling intact', async ({ page }) => {
   await waitForObjectCount(page, 1);
 
   // Style it (each panel change is one history step).
-  await page.getByTestId('text-outline-toggle').check();
+  await page.getByTestId('fx-outline-white').click();
   await page.getByTestId('delete-object').click();
   await waitForObjectCount(page, 0);
 

@@ -36,6 +36,10 @@ export interface DesignObjectBase {
 export const PATTERN_TYPES = ['grid', 'mirror', 'half-drop'] as const;
 export type PatternType = (typeof PATTERN_TYPES)[number];
 
+/** The vector shape silhouettes the studio offers (v2.7). */
+export const SHAPE_KINDS = ['rect', 'circle', 'star'] as const;
+export type ShapeKind = (typeof SHAPE_KINDS)[number];
+
 /**
  * Pattern fill (v1.9): the object's box becomes the BASE TILE and copies fill the
  * whole print area (clipped to it). 'grid' repeats as-is, 'mirror' alternates
@@ -137,12 +141,37 @@ export interface TextDesignObject extends DesignObjectBase {
   arc?: number;
 }
 
+/** Outline stroke around a vector shape; painted centered on the shape edge. */
+export interface ShapeStroke {
+  /** Strict #RRGGBB. */
+  color: string;
+  /** Stroke width in canvas px (SHAPE_STROKE_WIDTH_MIN..MAX). */
+  width: number;
+}
+
+/**
+ * One placed vector shape inside a print area (v2.7). Vector-like: no source
+ * bitmap, so it never participates in the DPI quality math (like text). The
+ * stored width/height is the stroke-inclusive bounding box; the renderer insets
+ * the silhouette by stroke/2 so the stroke's outer edge aligns to that box, the
+ * same edge-inclusive convention text outline uses.
+ */
+export interface ShapeDesignObject extends DesignObjectBase {
+  type: 'shape';
+  /** Which silhouette: rect, circle (ellipse in a non-square box), or star. */
+  shape: ShapeKind;
+  /** Fill color, strict #RRGGBB. */
+  fill: string;
+  /** Outline stroke (v2.7); absent = no stroke. */
+  stroke?: ShapeStroke;
+}
+
 /**
  * One placed object inside a print area, discriminated on `type`.
  * Stored objects without `type` are legacy images and normalize at read time
  * (see normalizeDesignDocument); the document version stays v2.
  */
-export type DesignObject = ImageDesignObject | TextDesignObject;
+export type DesignObject = ImageDesignObject | TextDesignObject | ShapeDesignObject;
 
 /** A stored object that may predate the `type` discriminator (legacy image shape). */
 export type StoredDesignObject = DesignObject | (Omit<ImageDesignObject, 'type'> & { type?: undefined });
@@ -380,10 +409,12 @@ export interface DesignPlacementSummaryDto {
   printAreaKey: string;
   /** Human name from the template's print area; falls back to the key. */
   printAreaName: string;
-  /** Total objects on the area (imageCount + textCount). */
+  /** Total objects on the area (imageCount + textCount + shapeCount). */
   objectCount: number;
   imageCount: number;
   textCount: number;
+  /** Vector shapes (v2.7). */
+  shapeCount: number;
 }
 
 /**

@@ -14,9 +14,15 @@ import {
   PATTERN_SPACING_MIN,
   PATTERN_TYPES,
   SHADOW_OFFSET_MAX,
+  SHAPE_KINDS,
+  SHAPE_STROKE_WIDTH_MAX,
+  SHAPE_STROKE_WIDTH_MIN,
+  starPolygonPoints,
   type ImagePattern,
   type OverlayBlend,
   type Rect,
+  type ShapeKind,
+  type ShapeStroke,
   type TextAlign,
   type TextOutline,
   type TextShadow,
@@ -119,7 +125,21 @@ export interface RenderTextObject extends RenderObjectGeometry {
   arc?: number;
 }
 
-export type RenderObject = RenderImageObject | RenderTextObject;
+export interface RenderShapeObject extends RenderObjectGeometry {
+  type: 'shape';
+  /** Silhouette: rect, circle (ellipse in a non-square box), or star. */
+  shape: ShapeKind;
+  /** Fill color, #RRGGBB. */
+  fill: string;
+  /**
+   * Outline stroke (v2.7). Painted centered on the shape edge; the silhouette is
+   * inset by width/2 so the stroke's outer edge aligns to the stored box, the same
+   * edge-inclusive convention text outline uses.
+   */
+  stroke?: ShapeStroke;
+}
+
+export type RenderObject = RenderImageObject | RenderTextObject | RenderShapeObject;
 
 export interface RenderMockupOptions {
   /** Absolute path to the template base image. */
@@ -551,12 +571,66 @@ async function prepareTextLayer(obj: RenderTextObject): Promise<PreparedLayer> {
   return finalizeLayer(fitted, obj);
 }
 
+/**
+ * SVG for one vector shape (v2.7) sized exactly to the stored box. The silhouette
+ * is inset by stroke/2 so the stroke's outer edge aligns to the box edge (the same
+ * edge-inclusive convention text outline uses). Only validated hex colors and our
+ * own computed numbers ever enter the markup, so there is no injection surface;
+ * the star vertices come from the SHARED starPolygonPoints so editor and server
+ * draw the identical silhouette.
+ */
+function buildShapeSvg(
+  shape: ShapeKind,
+  width: number,
+  height: number,
+  fill: string,
+  stroke: ShapeStroke | undefined,
+): string {
+  const sw = stroke ? Math.max(0, Math.min(stroke.width, Math.min(width, height) - 1)) : 0;
+  const half = sw / 2;
+  const innerW = width - sw;
+  const innerH = height - sw;
+  const strokeAttrs = sw > 0 ? ` stroke="${stroke!.color}" stroke-width="${sw.toFixed(2)}"` : '';
+  const f = (n: number): string => n.toFixed(2);
+
+  let body: string;
+  if (shape === 'rect') {
+    body = `<rect x="${f(half)}" y="${f(half)}" width="${f(innerW)}" height="${f(
+      innerH,
+    )}" fill="${fill}"${strokeAttrs} />`;
+  } else if (shape === 'circle') {
+    body = `<ellipse cx="${f(width / 2)}" cy="${f(height / 2)}" rx="${f(innerW / 2)}" ry="${f(
+      innerH / 2,
+    )}" fill="${fill}"${strokeAttrs} />`;
+  } else {
+    const points = starPolygonPoints(innerW, innerH)
+      .map((p) => `${f(p.x + half)},${f(p.y + half)}`)
+      .join(' ');
+    body = `<polygon points="${points}" fill="${fill}"${strokeAttrs} stroke-linejoin="round" />`;
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${body}</svg>`;
+}
+
+/**
+ * Rasterize a vector shape with sharp's SVG path, then rotate and position. The
+ * SVG is already box-sized so no fit-to-box step is needed; from the sized RGBA
+ * buffer onward it joins the shared finalizeLayer pipeline like every other layer.
+ */
+async function prepareShapeLayer(obj: RenderShapeObject): Promise<PreparedLayer> {
+  const width = Math.max(1, Math.round(obj.width));
+  const height = Math.max(1, Math.round(obj.height));
+  const svg = buildShapeSvg(obj.shape, width, height, obj.fill, obj.stroke);
+  const raster = await sharp(Buffer.from(svg)).ensureAlpha().png().toBuffer();
+  return finalizeLayer(raster, obj);
+}
+
 /** Per-object sanity checks the renderer enforces even if a caller forgot to validate. */
 function assertRenderableObject(obj: RenderObject, index: number, printArea: Rect): void {
   if (!isObjectInsideRect(obj, printArea)) {
     throw new RenderValidationError(`Design object ${index} is outside the print area`);
   }
-  if (obj.type !== 'text' && obj.pattern) {
+  if (obj.type === 'image' && obj.pattern) {
     if (
       !PATTERN_TYPES.includes(obj.pattern.type) ||
       !Number.isFinite(obj.pattern.spacing) ||
@@ -567,6 +641,24 @@ function assertRenderableObject(obj: RenderObject, index: number, printArea: Rec
     }
     if (obj.rotation % 360 !== 0) {
       throw new RenderValidationError(`Design object ${index} is patterned and must not be rotated`);
+    }
+  }
+  if (obj.type === 'shape') {
+    if (!SHAPE_KINDS.includes(obj.shape)) {
+      throw new RenderValidationError(`Design object ${index} has an unknown shape`);
+    }
+    if (!HEX_COLOR_PATTERN.test(obj.fill)) {
+      throw new RenderValidationError(`Design object ${index} has an invalid shape fill`);
+    }
+    if (obj.stroke) {
+      if (
+        !HEX_COLOR_PATTERN.test(obj.stroke.color) ||
+        !Number.isFinite(obj.stroke.width) ||
+        obj.stroke.width < SHAPE_STROKE_WIDTH_MIN ||
+        obj.stroke.width > SHAPE_STROKE_WIDTH_MAX
+      ) {
+        throw new RenderValidationError(`Design object ${index} has an invalid shape stroke`);
+      }
     }
   }
   if (obj.type === 'text') {
@@ -776,9 +868,11 @@ export async function renderMockup(options: RenderMockupOptions): Promise<Buffer
     const prepared =
       obj.type === 'text'
         ? await prepareTextLayer(obj)
-        : obj.pattern
-          ? await preparePatternLayer(obj, printArea)
-          : await prepareImageLayer(obj);
+        : obj.type === 'shape'
+          ? await prepareShapeLayer(obj)
+          : obj.pattern
+            ? await preparePatternLayer(obj, printArea)
+            : await prepareImageLayer(obj);
     designLayers.push({ input: prepared.input, left: prepared.left, top: prepared.top });
   }
 
@@ -888,6 +982,13 @@ function scaleRenderObject(obj: RenderObject, printArea: Rect, scale: number): R
         : {}),
     };
   }
+  if (obj.type === 'shape') {
+    return {
+      ...obj,
+      ...base,
+      ...(obj.stroke ? { stroke: { ...obj.stroke, width: obj.stroke.width * scale } } : {}),
+    };
+  }
   return {
     ...obj,
     ...base,
@@ -936,9 +1037,11 @@ export async function renderPrintFile(options: RenderPrintFileOptions): Promise<
     const prepared =
       obj.type === 'text'
         ? await prepareTextLayer(obj)
-        : obj.pattern
-          ? await preparePatternLayer(obj, printSpaceArea)
-          : await prepareImageLayer(obj);
+        : obj.type === 'shape'
+          ? await prepareShapeLayer(obj)
+          : obj.pattern
+            ? await preparePatternLayer(obj, printSpaceArea)
+            : await prepareImageLayer(obj);
     designLayers.push({ input: prepared.input, left: prepared.left + margin, top: prepared.top + margin });
   }
 

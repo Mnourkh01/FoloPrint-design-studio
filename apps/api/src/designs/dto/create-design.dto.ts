@@ -32,6 +32,9 @@ import {
   PATTERN_SPACING_MIN,
   PATTERN_TYPES,
   SHADOW_OFFSET_MAX,
+  SHAPE_KINDS,
+  SHAPE_STROKE_WIDTH_MAX,
+  SHAPE_STROKE_WIDTH_MIN,
   TEXT_ALIGNMENTS,
   TEXT_DIRECTIONS,
   TEXT_MAX_LENGTH,
@@ -39,6 +42,7 @@ import {
   TEXT_WRAP_MODES,
   type GarmentSize,
   type PatternType,
+  type ShapeKind,
   type TextAlign,
   type TextDirection,
   type TextWrapMode,
@@ -83,6 +87,20 @@ export class TextShadowDto {
 }
 
 const isText = (o: DesignObjectDto): boolean => o.type === 'text';
+const isShape = (o: DesignObjectDto): boolean => o.type === 'shape';
+/** Image objects, including pre-v1.5 typeless payloads (assetId was the only kind). */
+const isImage = (o: DesignObjectDto): boolean => o.type === 'image' || o.type === undefined;
+
+/** v2.7 shape outline stroke. Both fields required when the object is present. */
+export class ShapeStrokeDto {
+  @Matches(HEX_COLOR_PATTERN, { message: 'stroke color must be a #RRGGBB hex value' })
+  color!: string;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(SHAPE_STROKE_WIDTH_MIN)
+  @Max(SHAPE_STROKE_WIDTH_MAX)
+  width!: number;
+}
 
 /**
  * One design object: an image (assetId) or a text element, discriminated on `type`.
@@ -98,20 +116,37 @@ const isText = (o: DesignObjectDto): boolean => o.type === 'text';
  */
 export class DesignObjectDto {
   @IsOptional()
-  @IsIn(['image', 'text'])
-  type?: 'image' | 'text';
+  @IsIn(['image', 'text', 'shape'])
+  type?: 'image' | 'text' | 'shape';
 
   /** UploadedAsset id; required for image objects (and legacy typeless objects). */
-  @ValidateIf((o: DesignObjectDto) => !isText(o))
+  @ValidateIf(isImage)
   @IsUUID()
   assetId?: string;
 
   /** Tiling fill (v1.9); missing means the single image. Image objects only. */
-  @ValidateIf((o: DesignObjectDto) => !isText(o))
+  @ValidateIf(isImage)
   @IsOptional()
   @ValidateNested()
   @Type(() => ImagePatternDto)
   pattern?: ImagePatternDto;
+
+  /** Vector silhouette (v2.7); required for shape objects. */
+  @ValidateIf(isShape)
+  @IsIn(SHAPE_KINDS as readonly string[])
+  shape?: ShapeKind;
+
+  /** Fill color #RRGGBB; required for shape objects. */
+  @ValidateIf(isShape)
+  @Matches(HEX_COLOR_PATTERN, { message: 'fill must be a #RRGGBB hex value' })
+  fill?: string;
+
+  /** Outline stroke (v2.7); missing means none. Shape objects only. */
+  @ValidateIf(isShape)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ShapeStrokeDto)
+  stroke?: ShapeStrokeDto;
 
   /** Object center X, template canvas px. */
   @IsNumber({ allowNaN: false, allowInfinity: false })

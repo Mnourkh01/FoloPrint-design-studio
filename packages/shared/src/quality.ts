@@ -119,8 +119,10 @@ export function collectQualityWarnings(
   for (const placement of placements) {
     const ppi = ppiByKey.get(placement.printAreaKey) ?? null;
     placement.objects.forEach((object, objectIndex) => {
-      // Missing type = legacy image; only explicit text objects are skipped.
-      if (object.type === 'text') return;
+      // Missing type = legacy image. Text and shapes are vector-like (no source
+      // bitmap), so DPI does not apply and they are skipped; objectIndex still
+      // refers to the full objects array.
+      if (object.type === 'text' || object.type === 'shape') return;
       const asset = assetDimsById.get(object.assetId);
       if (!asset) return;
       const quality = evaluateObjectQuality(asset, object, ppi);

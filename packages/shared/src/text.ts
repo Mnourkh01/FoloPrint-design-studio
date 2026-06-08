@@ -1,9 +1,11 @@
 import { ARC_SWEEP_MAX, ARC_SWEEP_MIN } from './arc';
 import { isFontFamilyKey } from './fonts';
-import { PATTERN_TYPES } from './types';
+import { PATTERN_TYPES, SHAPE_KINDS } from './types';
 import type {
   ImagePattern,
   PatternType,
+  ShapeKind,
+  ShapeStroke,
   StoredDesignObject,
   TextAlign,
   TextDirection,
@@ -40,6 +42,9 @@ export const LETTER_SPACING_MAX = 100;
 /** Pattern tile gap bounds, canvas px (v1.9). */
 export const PATTERN_SPACING_MIN = 0;
 export const PATTERN_SPACING_MAX = 100;
+/** Shape outline stroke width bounds, canvas px (v2.7). */
+export const SHAPE_STROKE_WIDTH_MIN = 1;
+export const SHAPE_STROKE_WIDTH_MAX = 40;
 
 /**
  * Control characters are rejected except `\n` (explicit line breaks).
@@ -103,6 +108,9 @@ export function designObjectContentErrors(obj: StoredDesignObject): string[] {
   if (obj.type === 'text') {
     return textObjectContentErrors(obj);
   }
+  if (obj.type === 'shape') {
+    return shapeObjectContentErrors(obj);
+  }
   return imageObjectContentErrors(obj);
 }
 
@@ -130,6 +138,70 @@ function imageObjectContentErrors(
     carried.arc !== undefined
   ) {
     errors.push('Image object must not carry text fields');
+  }
+  if (carried.shape !== undefined || carried.fill !== undefined || carried.stroke !== undefined) {
+    errors.push('Image object must not carry shape fields');
+  }
+  return errors;
+}
+
+/** v2.7 shape stroke rules: well-formed object, hex color, bounded width. */
+function shapeStrokeErrors(stroke: ShapeStroke | undefined): string[] {
+  if (stroke === undefined) return [];
+  if (typeof stroke !== 'object' || stroke === null) {
+    return ['Shape stroke must be an object with color and width'];
+  }
+  const errors: string[] = [];
+  if (typeof stroke.color !== 'string' || !HEX_COLOR_PATTERN.test(stroke.color)) {
+    errors.push('Shape stroke color must be a #RRGGBB hex value');
+  }
+  if (
+    !isFiniteNumber(stroke.width) ||
+    stroke.width < SHAPE_STROKE_WIDTH_MIN ||
+    stroke.width > SHAPE_STROKE_WIDTH_MAX
+  ) {
+    errors.push(
+      `Shape stroke width must be between ${SHAPE_STROKE_WIDTH_MIN} and ${SHAPE_STROKE_WIDTH_MAX}`,
+    );
+  }
+  return errors;
+}
+
+/**
+ * Content rules for a vector shape (v2.7): known silhouette, hex fill, optional
+ * well-formed stroke, and kind purity (a shape carries no image or text fields).
+ * Geometry (finite, positive size, inside the print area) is enforced separately
+ * by validateDesignObjects, identical to every other object kind.
+ */
+function shapeObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'shape' }>): string[] {
+  const errors: string[] = [];
+
+  if (!SHAPE_KINDS.includes(obj.shape as ShapeKind)) {
+    errors.push(`Shape must be one of ${SHAPE_KINDS.join(', ')}`);
+  }
+  if (typeof obj.fill !== 'string' || !HEX_COLOR_PATTERN.test(obj.fill)) {
+    errors.push('Shape fill must be a #RRGGBB hex value');
+  }
+  errors.push(...shapeStrokeErrors(obj.stroke));
+
+  const carried = obj as unknown as Record<string, unknown>;
+  if (carried.assetId !== undefined || carried.pattern !== undefined) {
+    errors.push('Shape object must not carry image fields');
+  }
+  if (
+    carried.text !== undefined ||
+    carried.fontFamily !== undefined ||
+    carried.fontSize !== undefined ||
+    carried.align !== undefined ||
+    carried.direction !== undefined ||
+    carried.wrapMode !== undefined ||
+    carried.wrappedLines !== undefined ||
+    carried.outline !== undefined ||
+    carried.shadow !== undefined ||
+    carried.letterSpacing !== undefined ||
+    carried.arc !== undefined
+  ) {
+    errors.push('Shape object must not carry text fields');
   }
   return errors;
 }
@@ -168,6 +240,11 @@ function textObjectContentErrors(obj: Extract<StoredDesignObject, { type: 'text'
 
   if ((obj as unknown as Record<string, unknown>).pattern !== undefined) {
     errors.push('Text object must not carry a pattern');
+  }
+
+  const foreign = obj as unknown as Record<string, unknown>;
+  if (foreign.shape !== undefined || foreign.fill !== undefined || foreign.stroke !== undefined) {
+    errors.push('Text object must not carry shape fields');
   }
 
   const wrapMode: TextWrapMode = obj.wrapMode ?? 'none';

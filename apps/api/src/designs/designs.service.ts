@@ -220,6 +220,17 @@ export class DesignsService {
    */
   private toDocumentObject(o: DesignObjectDto): DesignObject {
     const base = { x: o.x, y: o.y, width: o.width, height: o.height, rotation: o.rotation };
+    if (o.type === 'shape') {
+      return {
+        type: 'shape',
+        shape: o.shape!,
+        fill: o.fill!,
+        ...(o.stroke !== undefined
+          ? { stroke: { color: o.stroke.color, width: o.stroke.width } }
+          : {}),
+        ...base,
+      };
+    }
     if (o.type === 'text') {
       return {
         type: 'text',
@@ -382,6 +393,15 @@ export class DesignsService {
   ): RenderObject[] {
     return placement.objects.map((obj, index): RenderObject => {
       const base = { x: obj.x, y: obj.y, width: obj.width, height: obj.height, rotation: obj.rotation };
+      if (obj.type === 'shape') {
+        return {
+          type: 'shape',
+          shape: obj.shape,
+          fill: obj.fill,
+          ...(obj.stroke ? { stroke: obj.stroke } : {}),
+          ...base,
+        };
+      }
       if (obj.type === 'text') {
         return {
           type: 'text',
@@ -602,12 +622,14 @@ export class DesignsService {
       placements = document.placements
         .map((placement) => {
           const textCount = placement.objects.filter((o) => o.type === 'text').length;
+          const shapeCount = placement.objects.filter((o) => o.type === 'shape').length;
           return {
             printAreaKey: placement.printAreaKey,
             printAreaName: nameOf.get(placement.printAreaKey) ?? placement.printAreaKey,
             objectCount: placement.objects.length,
-            imageCount: placement.objects.length - textCount,
+            imageCount: placement.objects.length - textCount - shapeCount,
             textCount,
+            shapeCount,
           };
         })
         .sort(this.byAreaOrder(template.printAreas, (s) => s.printAreaKey));
@@ -653,7 +675,7 @@ export class DesignsService {
     for (const placement of document.placements) {
       const ppi = ppiByKey.get(placement.printAreaKey) ?? null;
       for (const object of placement.objects) {
-        if (object.type === 'text') continue; // vector-like, DPI does not apply
+        if (object.type === 'text' || object.type === 'shape') continue; // vector-like, DPI n/a
         const dims = assetDims.get(object.assetId);
         if (!dims) continue;
         const quality = evaluateObjectQuality(dims, object, ppi);

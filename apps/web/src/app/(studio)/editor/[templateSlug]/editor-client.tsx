@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Canvas, FabricImage, IText, Line, Pattern, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
+import { Canvas, Ellipse, FabricImage, IText, Line, Pattern, Polygon, Rect, Shadow, Textbox, type FabricObject } from 'fabric';
 import {
   ARC_GLYPH_HEIGHT_FACTOR,
   ARC_SWEEP_MAX,
@@ -25,6 +25,10 @@ import {
   printAreaPpi,
   resolveTextDirection,
   SHADOW_OFFSET_MAX,
+  SHAPE_KINDS,
+  SHAPE_STROKE_WIDTH_MAX,
+  SHAPE_STROKE_WIDTH_MIN,
+  starPolygonPoints,
   TEXT_MAX_LINES,
   validateDesignPlacements,
   type DesignObject,
@@ -37,6 +41,8 @@ import {
   type PrintAreaDto,
   type PrintQualityLevel,
   type ProductTemplateDto,
+  type ShapeKind,
+  type ShapeStroke,
   type TextAlign,
   type TextDirection,
   type TextOutline,
@@ -110,7 +116,7 @@ const SNAP_GUIDE_STYLE = {
 } as const;
 
 /** Left tool rail entries; the contextual panel renders per active tool. */
-type StudioTool = 'product' | 'templates' | 'uploads' | 'text' | 'saved' | 'layers';
+type StudioTool = 'product' | 'templates' | 'uploads' | 'text' | 'shapes' | 'saved' | 'layers';
 
 /** Hand-drawn 24px stroke icons; no icon dependency for five glyphs. */
 const TOOL_ICONS: Record<StudioTool, React.ReactNode> = {
@@ -128,6 +134,12 @@ const TOOL_ICONS: Record<StudioTool, React.ReactNode> = {
   text: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
       <path d="M5 6V4h14v2M12 4v16m-3 0h6" />
+    </svg>
+  ),
+  shapes: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" aria-hidden>
+      <rect x="3.5" y="3.5" width="9.5" height="9.5" rx="1.5" />
+      <circle cx="15.5" cy="15.5" r="5" />
     </svg>
   ),
   templates: (
@@ -154,11 +166,20 @@ const TOOL_LABELS: Record<StudioTool, string> = {
   templates: 'Templates',
   uploads: 'Uploads',
   text: 'Text',
+  shapes: 'Shapes',
   saved: 'Saved',
   layers: 'Layers',
 };
 
-const TOOL_ORDER: StudioTool[] = ['product', 'templates', 'uploads', 'text', 'saved', 'layers'];
+const TOOL_ORDER: StudioTool[] = [
+  'product',
+  'templates',
+  'uploads',
+  'text',
+  'shapes',
+  'saved',
+  'layers',
+];
 
 /** Align actions for the Position tool: edge/center against the object's print area. */
 type AlignAction = 'left' | 'center-h' | 'right' | 'top' | 'center-v' | 'bottom';
@@ -434,6 +455,48 @@ const OVERVIEW_TILE_WIDTH = 260;
 /** Defaults for a freshly added text object. */
 const TEXT_DEFAULTS = { fontKey: 'inter', fontSize: 48, color: '#1a1a1a', align: 'center' as TextAlign };
 
+/** Default fill for a freshly added shape; stroke off by default. */
+const SHAPE_DEFAULTS = { fill: '#1d4ed8' };
+
+/** The three vector shapes the studio offers, in panel order (friendly labels). */
+const SHAPE_CHOICES: { key: ShapeKind; label: string }[] = [
+  { key: 'rect', label: 'Square' },
+  { key: 'circle', label: 'Circle' },
+  { key: 'star', label: 'Star' },
+];
+
+/** Filled silhouette glyphs for the shape-add buttons. */
+const SHAPE_GLYPHS: Record<ShapeKind, React.ReactNode> = {
+  rect: (
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  ),
+  circle: (
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden>
+      <circle cx="12" cy="12" r="9" />
+    </svg>
+  ),
+  star: (
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor" aria-hidden>
+      <path d="M12 2.5l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.8 6.2 20.9l1.1-6.5L2.6 9.3l6.5-.9z" />
+    </svg>
+  ),
+};
+
+/**
+ * One-tap shape stroke looks (mirrors OUTLINE_PRESETS for text). Each entry IS the
+ * saved value, so a chip preview shows exactly what gets applied; the exact color
+ * and width still live under the panel's stroke controls.
+ */
+const SHAPE_STROKE_PRESETS: { key: string; label: string; stroke: ShapeStroke | null }[] = [
+  { key: 'none', label: 'None', stroke: null },
+  { key: 'white', label: 'White', stroke: { color: '#ffffff', width: 6 } },
+  { key: 'black', label: 'Black', stroke: { color: '#000000', width: 6 } },
+  { key: 'gold', label: 'Gold', stroke: { color: '#d4af37', width: 6 } },
+  { key: 'thick', label: 'Thick', stroke: { color: '#ffffff', width: 14 } },
+];
+
 /** Curated color palette for the text panel; any #RRGGBB is valid, these are shortcuts. */
 const TEXT_SWATCHES = [
   '#1a1a1a', '#6b7280', '#ffffff', '#cf3f22', '#dc2626', '#db2777',
@@ -620,7 +683,7 @@ const ALIGN_CHOICES: { key: TextAlign; aria: string; icon: React.ReactNode }[] =
  * (Fabric's own fontFamily holds the CSS family name).
  */
 type DesignedObject = FabricObject & {
-  kind?: 'image' | 'text';
+  kind?: 'image' | 'text' | 'shape';
   assetId?: string;
   printAreaKey?: string;
   fontKey?: string;
@@ -628,6 +691,8 @@ type DesignedObject = FabricObject & {
   textDirection?: TextDirection;
   /** v1.9 tiling fill (image objects); the preview rect is rebuilt from this. */
   pattern?: ImagePattern;
+  /** v2.7 vector shape silhouette ('rect' | 'circle' | 'star') for shape objects. */
+  shapeKind?: ShapeKind;
 };
 
 /** Non-interactive area-sized rect carrying the live pattern preview for one image. */
@@ -671,7 +736,7 @@ interface Status {
 }
 
 interface SelectionReadout {
-  kind: 'image' | 'text';
+  kind: 'image' | 'text' | 'shape';
   x: number;
   y: number;
   width: number;
@@ -705,6 +770,13 @@ interface SelectionReadout {
     letterSpacing: number;
     /** v1.8 arc sweep in degrees; null = straight. */
     arc: number | null;
+  } | null;
+  /** Shape styling, present when kind === 'shape'. */
+  shape: {
+    shapeKind: ShapeKind;
+    fill: string;
+    /** v2.7 outline stroke; null = off. */
+    stroke: ShapeStroke | null;
   } | null;
 }
 
@@ -1162,7 +1234,9 @@ export function EditorClient({
       // user is browsing the layers list (selecting from there must not yank the
       // panel away).
       if (toolRef.current !== 'layers') {
-        setTool(designed.kind === 'text' ? 'text' : 'uploads');
+        setTool(
+          designed.kind === 'text' ? 'text' : designed.kind === 'shape' ? 'shapes' : 'uploads',
+        );
       }
       // DPI is image-only: text is vector-like and rerenders sharp at any size.
       const quality = designed.kind === 'image' ? qualityOf(designed) : null;
@@ -1228,6 +1302,17 @@ export function EditorClient({
               arc: null,
             }
           : null;
+      const shape =
+        designed.kind === 'shape'
+          ? {
+              shapeKind: designed.shapeKind ?? ('rect' as ShapeKind),
+              fill: typeof designed.fill === 'string' ? (designed.fill as string) : SHAPE_DEFAULTS.fill,
+              stroke:
+                typeof designed.stroke === 'string' && (designed.strokeWidth ?? 0) > 0
+                  ? { color: designed.stroke as string, width: designed.strokeWidth ?? 0 }
+                  : null,
+            }
+          : null;
       setSelection({
         kind: designed.kind,
         x: Math.round(designed.left ?? 0),
@@ -1241,6 +1326,7 @@ export function EditorClient({
         physical,
         pattern: designed.kind === 'image' ? (designed.pattern ?? null) : null,
         text,
+        shape,
       });
     },
     [qualityOf, ppiByKey],
@@ -1367,6 +1453,46 @@ export function EditorClient({
   );
 
   /**
+   * Builds a tagged vector shape (v2.7). strokeUniform keeps the stroke a constant
+   * canvas px under scaling, so the stored stroke width is exactly the contract px
+   * and getScaledWidth/Height are the stroke-inclusive box the server expects.
+   * Side + corner handles are kept (rect/ellipse are usefully non-square); the
+   * star uses the SHARED starPolygonPoints so the editor and server silhouettes
+   * are identical.
+   */
+  const makeDesignedShape = useCallback(
+    (
+      shape: ShapeKind,
+      areaKey: string,
+      props: { width: number; height: number; fill: string; stroke?: ShapeStroke },
+    ): DesignedObject => {
+      const common = {
+        originX: 'center' as const,
+        originY: 'center' as const,
+        fill: props.fill,
+        strokeUniform: true,
+        ...(props.stroke
+          ? { stroke: props.stroke.color, strokeWidth: props.stroke.width }
+          : { strokeWidth: 0 }),
+      };
+      let obj: DesignedObject;
+      if (shape === 'rect') {
+        obj = new Rect({ ...common, width: props.width, height: props.height }) as DesignedObject;
+      } else if (shape === 'circle') {
+        obj = new Ellipse({ ...common, rx: props.width / 2, ry: props.height / 2 }) as DesignedObject;
+      } else {
+        obj = new Polygon(starPolygonPoints(props.width, props.height), common) as DesignedObject;
+      }
+      applySelectionStyle(obj);
+      obj.kind = 'shape';
+      obj.shapeKind = shape;
+      obj.printAreaKey = areaKey;
+      return obj;
+    },
+    [],
+  );
+
+  /**
    * Rebuilds one stored image object on the canvas (reopen and undo/redo paths).
    * Async (network image); checks the canvas is still current before adding.
    */
@@ -1415,6 +1541,42 @@ export function EditorClient({
         });
     },
     [refreshAreaCounts],
+  );
+
+  /**
+   * Rebuilds one stored vector shape on the canvas (reopen and undo/redo paths).
+   * Synchronous (no network). The stored box is stroke-inclusive, so the path is
+   * rebuilt at box minus stroke and strokeUniform re-adds the stroke; getScaledWidth
+   * then equals the stored box exactly, mirroring the server's inset-by-stroke/2.
+   */
+  const restoreShapeObject = useCallback(
+    (saved: Extract<DesignObject, { type: 'shape' }>, areaKey: string): void => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const sw = saved.stroke?.width ?? 0;
+      const width = Math.max(1, saved.width - sw);
+      const height = Math.max(1, saved.height - sw);
+      const mine = areaKey === activeAreaKeyRef.current;
+      const obj = makeDesignedShape(saved.shape, areaKey, {
+        width,
+        height,
+        fill: saved.fill,
+        ...(saved.stroke ? { stroke: saved.stroke } : {}),
+      });
+      obj.set({
+        left: saved.x,
+        top: saved.y,
+        angle: saved.rotation,
+        visible: mine,
+        evented: mine,
+        selectable: mine,
+      });
+      obj.setCoords();
+      canvas.add(obj);
+      canvas.requestRenderAll();
+      refreshAreaCounts();
+    },
+    [makeDesignedShape, refreshAreaCounts],
   );
 
   /**
@@ -1649,7 +1811,9 @@ export function EditorClient({
           pending.push(
             saved.type === 'text'
               ? restoreTextObject(saved, placement.printAreaKey)
-              : restoreImageObject(saved, placement.printAreaKey),
+              : saved.type === 'shape'
+                ? Promise.resolve(restoreShapeObject(saved, placement.printAreaKey))
+                : restoreImageObject(saved, placement.printAreaKey),
           );
         }
       }
@@ -2382,6 +2546,30 @@ export function EditorClient({
     });
   };
 
+  /** Adds a vector shape centered in the active area at ~40% of its short side. */
+  const handleAddShape = (shape: ShapeKind) => {
+    const canvas = canvasRef.current;
+    const area = activeArea;
+    if (!canvas || !area) return;
+    const size = Math.round(Math.min(area.width, area.height) * 0.4);
+    const obj = makeDesignedShape(shape, area.key, {
+      width: size,
+      height: size,
+      fill: SHAPE_DEFAULTS.fill,
+    });
+    obj.set({ left: area.x + area.width / 2, top: area.y + area.height / 2 });
+    obj.setCoords();
+    fitToPrintArea(obj);
+    canvas.add(obj);
+    canvas.setActiveObject(obj);
+    canvas.requestRenderAll();
+    readSelection(obj);
+    refreshAreaCounts();
+    markMutated();
+    const label = SHAPE_CHOICES.find((c) => c.key === shape)?.label ?? 'Shape';
+    setStatus({ tone: 'success', message: `${label} added to ${area.name}.` });
+  };
+
   /**
    * Drops a starter template's lines onto the active side as editable text objects.
    * One history step (a single markMutated after all lines), positioned by the
@@ -2442,6 +2630,67 @@ export function EditorClient({
       markMutated();
     },
     [clampTextScale, fitToPrintArea, readSelection, markMutated],
+  );
+
+  /** Applies a styling change to the selected shape object and re-fits it. */
+  const updateActiveShape = useCallback(
+    (mutate: (o: DesignedObject) => void) => {
+      const canvas = canvasRef.current;
+      const active = canvas?.getActiveObject() as DesignedObject | undefined;
+      if (!canvas || active?.kind !== 'shape') return;
+      mutate(active);
+      active.setCoords();
+      fitToPrintArea(active);
+      canvas.requestRenderAll();
+      readSelection(active);
+      markMutated();
+    },
+    [fitToPrintArea, readSelection, markMutated],
+  );
+
+  /** Sets the shape fill color (swatch or custom). */
+  const applyShapeFill = useCallback(
+    (color: string) => updateActiveShape((o) => o.set({ fill: color })),
+    [updateActiveShape],
+  );
+
+  /** Applies a one-tap stroke look to the selected shape (null = remove). */
+  const applyShapeStrokePreset = useCallback(
+    (stroke: ShapeStroke | null) =>
+      updateActiveShape((o) =>
+        stroke
+          ? o.set({ stroke: stroke.color, strokeWidth: stroke.width, strokeUniform: true })
+          : o.set({ stroke: undefined, strokeWidth: 0 }),
+      ),
+    [updateActiveShape],
+  );
+
+  /** Fine-tunes the selected shape's stroke color (keeps a visible width). */
+  const setShapeStrokeColor = useCallback(
+    (color: string) =>
+      updateActiveShape((o) =>
+        o.set({
+          stroke: color,
+          strokeUniform: true,
+          strokeWidth: Math.max(o.strokeWidth ?? 0, SHAPE_STROKE_WIDTH_MIN),
+        }),
+      ),
+    [updateActiveShape],
+  );
+
+  /** Fine-tunes the selected shape's stroke width within the contract bounds. */
+  const setShapeStrokeWidth = useCallback(
+    (width: number) => {
+      const w = Math.min(Math.max(Math.round(width), SHAPE_STROKE_WIDTH_MIN), SHAPE_STROKE_WIDTH_MAX);
+      updateActiveShape((o) =>
+        o.set({
+          strokeWidth: w,
+          strokeUniform: true,
+          stroke: typeof o.stroke === 'string' ? o.stroke : '#000000',
+        }),
+      );
+    },
+    [updateActiveShape],
   );
 
   /** The contextual tool follows the selection; no selection, no tool panel. */
@@ -2935,6 +3184,30 @@ export function EditorClient({
           height: t.getScaledHeight(),
           rotation: (t.angle ?? 0) % 360,
         };
+      } else if (obj.kind === 'shape') {
+        // strokeUniform keeps strokeWidth a constant canvas px (no scale bake), and
+        // getScaledWidth/Height already include it: the stored box is stroke-inclusive.
+        const stroke =
+          typeof obj.stroke === 'string' && (obj.strokeWidth ?? 0) > 0
+            ? {
+                color: obj.stroke,
+                width: Math.min(
+                  Math.max(obj.strokeWidth ?? 1, SHAPE_STROKE_WIDTH_MIN),
+                  SHAPE_STROKE_WIDTH_MAX,
+                ),
+              }
+            : undefined;
+        serialized = {
+          type: 'shape',
+          shape: obj.shapeKind ?? 'rect',
+          fill: typeof obj.fill === 'string' ? obj.fill : SHAPE_DEFAULTS.fill,
+          ...(stroke ? { stroke } : {}),
+          x: obj.left ?? 0,
+          y: obj.top ?? 0,
+          width: obj.getScaledWidth(),
+          height: obj.getScaledHeight(),
+          rotation: (obj.angle ?? 0) % 360,
+        };
       } else if (obj.assetId) {
         serialized = {
           type: 'image',
@@ -3001,7 +3274,9 @@ export function EditorClient({
             pending.push(
               saved.type === 'text'
                 ? restoreTextObject(saved, placement.printAreaKey)
-                : restoreImageObject(saved, placement.printAreaKey),
+                : saved.type === 'shape'
+                  ? Promise.resolve(restoreShapeObject(saved, placement.printAreaKey))
+                  : restoreImageObject(saved, placement.printAreaKey),
             );
           }
         }
@@ -3012,7 +3287,7 @@ export function EditorClient({
         restoringRef.current = false;
       }
     },
-    [designedObjects, restoreImageObject, restoreTextObject, refreshAreaCounts],
+    [designedObjects, restoreImageObject, restoreShapeObject, restoreTextObject, refreshAreaCounts],
   );
 
   const undo = useCallback(async () => {
@@ -3275,6 +3550,116 @@ export function EditorClient({
           </span>
         )}
       </div>
+      {selection.shape && (
+        <div className="text-panel" data-testid="shape-panel">
+          <p className="text-panel__hint">Pick a fill and an optional outline.</p>
+          <div className="text-panel__field">
+            <span className="text-panel__label">Fill</span>
+            <div className="text-panel__swatches">
+              {TEXT_SWATCHES.map((swatch) => (
+                <button
+                  key={swatch}
+                  type="button"
+                  className="text-panel__swatch"
+                  data-testid={`shape-fill-${swatch.slice(1)}`}
+                  style={{ background: swatch }}
+                  aria-label={`Fill ${swatch}`}
+                  aria-pressed={selection.shape!.fill.toLowerCase() === swatch.toLowerCase()}
+                  onClick={() => {
+                    pushRecentColor(swatch);
+                    applyShapeFill(swatch);
+                  }}
+                />
+              ))}
+              <input
+                type="color"
+                data-testid="shape-fill-input"
+                value={selection.shape.fill}
+                onChange={(e) => {
+                  pushRecentColor(e.target.value);
+                  applyShapeFill(e.target.value);
+                }}
+              />
+            </div>
+          </div>
+          <div className="text-panel__field" role="group" aria-label="Outline">
+            <span className="text-panel__label">Outline</span>
+            <div className="fx-row">
+              {SHAPE_STROKE_PRESETS.map((preset) => {
+                const cur = selection.shape!.stroke;
+                const active = preset.stroke
+                  ? Boolean(cur) &&
+                    cur!.color.toLowerCase() === preset.stroke.color.toLowerCase() &&
+                    Math.round(cur!.width) === preset.stroke.width
+                  : !cur;
+                return (
+                  <button
+                    key={preset.key}
+                    type="button"
+                    data-testid={`fx-shape-stroke-${preset.key}`}
+                    aria-pressed={active}
+                    className={active ? 'fx-chip fx-chip--active' : 'fx-chip'}
+                    onClick={() => applyShapeStrokePreset(preset.stroke)}
+                  >
+                    <span
+                      className="fx-chip__preview"
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    >
+                      <span
+                        style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: 4,
+                          background: selection.shape!.fill,
+                          border: preset.stroke
+                            ? `3px solid ${preset.stroke.color}`
+                            : '1px dashed #9ca3af',
+                          boxSizing: 'border-box',
+                        }}
+                      />
+                    </span>
+                    <span className="fx-chip__label">{preset.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {selection.shape.stroke && (
+            <div
+              className="text-panel__field"
+              role="group"
+              aria-label="Outline width"
+              data-testid="shape-stroke-tune"
+            >
+              <span className="text-panel__label">Outline width</span>
+              <div className="fx-slider">
+                <span className="fx-slider__hint" aria-hidden>
+                  |
+                </span>
+                <input
+                  type="range"
+                  className="fx-slider__range"
+                  data-testid="shape-stroke-width"
+                  min={SHAPE_STROKE_WIDTH_MIN}
+                  max={SHAPE_STROKE_WIDTH_MAX}
+                  value={Math.round(selection.shape.stroke.width)}
+                  aria-label="Outline width"
+                  onChange={(e) => setShapeStrokeWidth(Number(e.target.value))}
+                />
+                <span className="fx-slider__hint fx-slider__hint--big" aria-hidden>
+                  |
+                </span>
+                <input
+                  type="color"
+                  data-testid="shape-stroke-color"
+                  value={selection.shape.stroke.color}
+                  onChange={(e) => setShapeStrokeColor(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {selection.text && (
         <div className="text-panel" data-testid="text-panel">
           <p className="text-panel__hint">
@@ -4117,6 +4502,44 @@ export function EditorClient({
             </>
           )}
 
+          {tool === 'shapes' && (
+            <>
+              <p className="studio__panel-title">Shapes</p>
+              <p className="studio__panel-copy">
+                Drop a shape on <b>{activeArea?.name ?? 'the active side'}</b>, then set its color
+                below.
+              </p>
+              <div
+                data-testid="shape-gallery"
+                style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}
+              >
+                {SHAPE_CHOICES.map((choice) => (
+                  <button
+                    key={choice.key}
+                    type="button"
+                    className="btn btn--ghost"
+                    data-testid={`shape-add-${choice.key}`}
+                    disabled={busy !== null}
+                    onClick={() => handleAddShape(choice.key)}
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '12px 6px',
+                    }}
+                  >
+                    <span aria-hidden style={{ color: '#1d4ed8' }}>
+                      {SHAPE_GLYPHS[choice.key]}
+                    </span>
+                    {choice.label}
+                  </button>
+                ))}
+              </div>
+              {selectionSection}
+            </>
+          )}
+
           {tool === 'saved' && (
             <>
               <p className="studio__panel-title">Saved design</p>
@@ -4171,11 +4594,13 @@ export function EditorClient({
                         }
                         onClick={() => selectLayer(obj)}
                       >
-                        {TOOL_ICONS[obj.kind === 'text' ? 'text' : 'uploads']}
+                        {TOOL_ICONS[obj.kind === 'text' ? 'text' : obj.kind === 'shape' ? 'shapes' : 'uploads']}
                         <span>
                           {obj.kind === 'text'
                             ? ((obj as DesignedText).text ?? 'Text').split('\n')[0]!.slice(0, 26) || 'Text'
-                            : 'Image'}
+                            : obj.kind === 'shape'
+                              ? (SHAPE_CHOICES.find((c) => c.key === obj.shapeKind)?.label ?? 'Shape')
+                              : 'Image'}
                         </span>
                       </button>
                     </li>

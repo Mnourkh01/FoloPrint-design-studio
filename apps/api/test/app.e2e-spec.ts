@@ -798,6 +798,83 @@ describe('FoloPrint Design Studio API (e2e)', () => {
     });
   });
 
+  describe('vector shapes (v2.7)', () => {
+    const postFront = (objects: object[]) =>
+      http()
+        .post('/designs')
+        .send({ templateId: template.id, placements: [{ printAreaKey: 'front', objects }] });
+
+    /** A shape centered inside the given area. */
+    const shapeIn = (a: PrintAreaDto, overrides: Record<string, unknown> = {}) => ({
+      type: 'shape',
+      shape: 'rect',
+      fill: '#cf3f22',
+      x: a.x + a.width / 2,
+      y: a.y + a.height / 2,
+      width: 120,
+      height: 120,
+      rotation: 0,
+      ...overrides,
+    });
+
+    it('saves, renders, and reopens a rect with a stroke', async () => {
+      const res = await postFront([
+        { ...shapeIn(area('front')), stroke: { color: '#ffffff', width: 6 } },
+      ]).expect(201);
+      const dto = res.body as DesignProjectDto;
+      expect(dto.design.placements[0]!.objects[0]).toMatchObject({
+        type: 'shape',
+        shape: 'rect',
+        fill: '#cf3f22',
+        stroke: { color: '#ffffff', width: 6 },
+      });
+
+      await http().post(`/designs/${dto.id}/render`).expect(201);
+      const png = await fetchPngBuffer(`/designs/${dto.id}/preview/front`);
+      expect(png.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
+
+      const reopened = await http().get(`/designs/${dto.id}`).expect(200);
+      expect((reopened.body as DesignProjectDto).design.placements[0]!.objects[0]).toMatchObject({
+        type: 'shape',
+        shape: 'rect',
+        stroke: { color: '#ffffff', width: 6 },
+      });
+    });
+
+    it('renders circle and star silhouettes', async () => {
+      for (const shape of ['circle', 'star'] as const) {
+        const res = await postFront([shapeIn(area('front'), { shape })]).expect(201);
+        const id = (res.body as DesignProjectDto).id;
+        await http().post(`/designs/${id}/render`).expect(201);
+        await http().get(`/designs/${id}/preview/front`).expect(200);
+      }
+    });
+
+    it('rejects bad fill, unknown silhouette, out-of-range stroke, and impure shapes', async () => {
+      await postFront([shapeIn(area('front'), { fill: 'red' })]).expect(400);
+      await postFront([shapeIn(area('front'), { shape: 'triangle' })]).expect(400);
+      await postFront([shapeIn(area('front'), { stroke: { color: '#ffffff', width: 99 } })]).expect(400);
+      const impure = await postFront([
+        { ...shapeIn(area('front')), assetId: '11111111-1111-1111-1111-111111111111' },
+      ]).expect(400);
+      expect(JSON.stringify(impure.body)).toMatch(/must not carry image fields/i);
+    });
+
+    it('counts shapes separately from images and text in the library summary', async () => {
+      const a = area('front');
+      const res = await postFront([shapeIn(a), shapeIn(a, { x: a.x + 80 })]).expect(201);
+      const id = (res.body as DesignProjectDto).id;
+      const list = (await http().get('/designs?pageSize=50').expect(200)).body as DesignListDto;
+      const row = list.items.find((i) => i.id === id);
+      expect(row).toBeDefined();
+      const front = row!.placements.find((p) => p.printAreaKey === 'front')!;
+      expect(front.shapeCount).toBe(2);
+      expect(front.imageCount).toBe(0);
+      expect(front.textCount).toBe(0);
+      expect(front.objectCount).toBe(2);
+    });
+  });
+
   describe('stored v1 documents (legacy designs)', () => {
     /** Simulates a design saved by v1.1: raw v1 document inserted directly. */
     const insertV1Design = async (assetId: string): Promise<string> => {
@@ -1647,10 +1724,10 @@ describe('FoloPrint Design Studio API (e2e)', () => {
       const [first, second] = list.items as [DesignListItemDto, DesignListItemDto];
       expect(first.template).toEqual({ id: template.id, name: 'Classic Tee', slug: 'classic-tee' });
       expect(first.placements).toEqual([
-        { printAreaKey: 'front', printAreaName: area('front').name, objectCount: 1, imageCount: 1, textCount: 0 },
+        { printAreaKey: 'front', printAreaName: area('front').name, objectCount: 1, imageCount: 1, textCount: 0, shapeCount: 0 },
       ]);
       expect(second.placements).toEqual([
-        { printAreaKey: 'back', printAreaName: area('back').name, objectCount: 2, imageCount: 2, textCount: 0 },
+        { printAreaKey: 'back', printAreaName: area('back').name, objectCount: 2, imageCount: 2, textCount: 0, shapeCount: 0 },
       ]);
       expect(Date.parse(first.createdAt)).not.toBeNaN();
       expect(Date.parse(first.updatedAt)).not.toBeNaN();

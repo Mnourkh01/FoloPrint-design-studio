@@ -5,3 +5,4 @@ export * from './quality';
 export * from './fonts';
 export * from './text';
 export * from './arc';
+export * from './shapes';
